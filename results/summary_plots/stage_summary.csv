@@ -1,0 +1,5 @@
+stage,mean_f1,std_f1,mean_precision,std_precision,mean_recall,std_recall,total_pos,total_neg,n_folds
+Stage 1: RefTech on RefData,1.000000,0.000000,1.000000,0.000000,1.000000,0.000000,1344,54918,5
+Stage 2: MyMethod on RefData,1.000000,0.000000,1.000000,0.000000,1.000000,0.000000,1344,54918,5
+Stage 3: RefTech on MyData+W,0.178015,0.016291,0.110714,0.011359,0.463474,0.078339,3830,125366,5
+Stage 4: MyMethod on MyData+W,0.183750,0.024081,0.161044,0.017629,0.219022,0.050160,3830,125366,5

@@ -90,6 +90,12 @@ def _stage_colors() -> list[str]:
     return [BAR_COLOR, ACCENT, BAR_COLOR, ACCENT]
 
 
+def _format_fbeta_label(beta: float) -> str:
+    if abs(beta - round(beta)) < 1e-6:
+        return f"F{int(round(beta))}"
+    return f"Fbeta (beta={beta:g})"
+
+
 def plot_stage_bars(m1, m2, m3, m4, outdir: Path, strict_tag: str = "STRICT GroupKFold") -> None:
     labels = [
         "Stage 1: RefTech on RefData",
@@ -117,6 +123,37 @@ def plot_stage_bars(m1, m2, m3, m4, outdir: Path, strict_tag: str = "STRICT Grou
         ax.text(i, min(0.98, v + 0.02), f"{v:.3f}", ha="center", va="bottom", color=FG_COLOR)
     fig.tight_layout()
     fig.savefig(outdir / "f1_mean_std_stages.png", dpi=300, bbox_inches="tight", facecolor=fig.get_facecolor())
+    plt.close(fig)
+
+
+def plot_fbeta_bars(m1, m2, m3, m4, outdir: Path, beta: float) -> None:
+    labels = [
+        "Stage 1: RefTech on RefData",
+        "Stage 2: MyMethod on RefData",
+        "Stage 3: RefTech on MyData+W",
+        "Stage 4: MyMethod on MyData+W",
+    ]
+    means = [m1["mean_fbeta"], m2["mean_fbeta"], m3["mean_fbeta"], m4["mean_fbeta"]]
+    stds = [m1["std_fbeta"], m2["std_fbeta"], m3["std_fbeta"], m4["std_fbeta"]]
+    metric_label = _format_fbeta_label(beta)
+
+    fig, ax = plt.subplots(figsize=(14, 6))
+    x = np.arange(len(labels))
+    ax.bar(x, means, yerr=stds, capsize=6, color=_stage_colors(), edgecolor="#3A3A48")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels)
+    ax.set_ylim(0, 1.0)
+    ax.set_ylabel(f"Mean {metric_label}-score (Pit-stop class = 1)")
+    apply_f1_style(
+        ax,
+        fig,
+        title=f"{metric_label} by Stage - Unseen Races (GroupKFold)",
+        x_rotation=20,
+    )
+    for i, v in enumerate(means):
+        ax.text(i, min(0.98, v + 0.02), f"{v:.3f}", ha="center", va="bottom", color=FG_COLOR)
+    fig.tight_layout()
+    fig.savefig(outdir / "fbeta_mean_std_stages.png", dpi=300, bbox_inches="tight", facecolor=fig.get_facecolor())
     plt.close(fig)
 
 
@@ -212,21 +249,59 @@ def write_summary_csv(m1, m2, m3, m4, outpath: Path) -> None:
         rec_mu, rec_sd = _mean_std(m, "recall")
         pr_mu, pr_sd = _mean_std(m, "pr_auc")
         f1_mu, f1_sd = m["mean_f1"], m["std_f1"]
+        fbeta_mu = m.get("mean_fbeta")
+        fbeta_sd = m.get("std_fbeta")
+        if fbeta_mu is None and m.get("folds") and "fbeta" in m["folds"][0]:
+            fbeta_mu, fbeta_sd = _mean_std(m, "fbeta")
+        threshold_mean = m.get("mean_threshold", m.get("threshold", 0.5))
+        threshold_std = m.get("std_threshold", 0.0)
+        beta = m.get("beta", 1.0)
         rows.append(
             dict(
                 stage=name,
                 mean_f1=f1_mu,
                 std_f1=f1_sd,
+                mean_fbeta=fbeta_mu,
+                std_fbeta=fbeta_sd,
                 mean_precision=prec_mu,
                 std_precision=prec_sd,
                 mean_recall=rec_mu,
                 std_recall=rec_sd,
                 mean_pr_auc=pr_mu,
                 std_pr_auc=pr_sd,
-                threshold=m.get("threshold", 0.5),
+                threshold=threshold_mean,
+                std_threshold=threshold_std,
                 n_splits=m.get("n_splits", 5),
+                beta=beta,
             )
         )
+    pd.DataFrame(rows).to_csv(outpath, index=False)
+
+
+def write_fold_csv(m1, m2, m3, m4, outpath: Path) -> None:
+    rows = []
+    stages = [
+        ("Stage 1: RefTech on RefData", m1),
+        ("Stage 2: MyMethod on RefData", m2),
+        ("Stage 3: RefTech on MyData+W", m3),
+        ("Stage 4: MyMethod on MyData+W", m4),
+    ]
+    for name, m in stages:
+        beta = m.get("beta", 1.0)
+        for f in m.get("folds", []):
+            rows.append(
+                dict(
+                    stage=name,
+                    fold=f.get("fold"),
+                    f1=f.get("f1"),
+                    fbeta=f.get("fbeta"),
+                    precision=f.get("precision"),
+                    recall=f.get("recall"),
+                    pr_auc=f.get("pr_auc"),
+                    threshold=f.get("threshold"),
+                    beta=beta,
+                )
+            )
     pd.DataFrame(rows).to_csv(outpath, index=False)
 
 
@@ -238,6 +313,10 @@ def main() -> None:
 
     # Main stage comparison
     plot_stage_bars(m1, m2, m3, m4, paths.out_summary_plots)
+
+    if "mean_fbeta" in m1:
+        beta = float(m1.get("beta", 1.0))
+        plot_fbeta_bars(m1, m2, m3, m4, paths.out_summary_plots, beta)
 
     # Recall (important for pit-stop detection)
     plot_recall_bars(m1, m2, m3, m4, paths.out_summary_plots)
@@ -260,8 +339,25 @@ def main() -> None:
         paths.out_summary_plots / "delta_f1_stage4_minus_stage3.png",
     )
 
+    if m1.get("folds") and "fbeta" in m1["folds"][0]:
+        beta = float(m1.get("beta", 1.0))
+        metric_label = _format_fbeta_label(beta)
+        d21b = [f2["fbeta"] - f1["fbeta"] for f1, f2 in zip(m1["folds"], m2["folds"])]
+        d43b = [f4["fbeta"] - f3["fbeta"] for f3, f4 in zip(m3["folds"], m4["folds"])]
+        plot_delta(
+            f"Improvement Consistency on Reference Dataset\nStage 2 vs Stage 1 (Delta {metric_label} = MyMethod - RefTech)",
+            d21b,
+            paths.out_summary_plots / "delta_fbeta_stage2_minus_stage1.png",
+        )
+        plot_delta(
+            f"Improvement Consistency on Personal Dataset + Weather\nStage 4 vs Stage 3 (Delta {metric_label} = MyMethod - RefTech)",
+            d43b,
+            paths.out_summary_plots / "delta_fbeta_stage4_minus_stage3.png",
+        )
+
     # Summary table
     write_summary_csv(m1, m2, m3, m4, paths.out_summary_plots / "stage_summary_strict.csv")
+    write_fold_csv(m1, m2, m3, m4, paths.out_summary_plots / "stage_folds_strict.csv")
 
     print("[OK] Saved plots + CSV summary to:", paths.out_summary_plots)
 

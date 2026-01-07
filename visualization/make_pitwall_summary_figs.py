@@ -86,6 +86,42 @@ def _format_title(text: str) -> str:
     return "  ".join(text.split())
 
 
+def _format_metric_label(metric: str, beta: float | None) -> str:
+    if metric == "f1":
+        return "F1 (Pit-stop class)"
+    if metric == "fbeta":
+        if beta is not None and abs(beta - round(beta)) < 1e-6:
+            return f"F{int(round(beta))} (Pit-stop class)"
+        if beta is not None:
+            return f"Fbeta (beta={beta:g}) (Pit-stop class)"
+        return "Fbeta (Pit-stop class)"
+    if metric == "pr_auc":
+        return "PR-AUC"
+    if metric == "recall":
+        return "Recall"
+    if metric == "precision":
+        return "Precision"
+    return metric.upper()
+
+
+def _metric_short(metric: str, beta: float | None) -> str:
+    if metric == "f1":
+        return "F1"
+    if metric == "fbeta":
+        if beta is not None and abs(beta - round(beta)) < 1e-6:
+            return f"F{int(round(beta))}"
+        if beta is not None:
+            return f"Fbeta({beta:g})"
+        return "Fbeta"
+    if metric == "pr_auc":
+        return "PR-AUC"
+    if metric == "recall":
+        return "Recall"
+    if metric == "precision":
+        return "Precision"
+    return metric.upper()
+
+
 def _add_header(fig, title: str, subtitle: str, strict_tag: bool) -> None:
     header_h = HEADER_H
     fig.patches.append(
@@ -207,10 +243,25 @@ def _detect_stage_col(df: pd.DataFrame) -> str:
     )
 
 
+def _extract_beta(df: pd.DataFrame) -> float | None:
+    beta_col = _find_col(df, ["beta", "f_beta", "fbeta_beta"])
+    if not beta_col:
+        return None
+    series = df[beta_col].dropna()
+    if series.empty:
+        return None
+    try:
+        return float(series.iloc[0])
+    except (TypeError, ValueError):
+        return None
+
+
 def _metric_key(val: str) -> str | None:
     n = _normalize(str(val))
     if "f1" in n:
         return "f1"
+    if "fbeta" in n or "f2" in n:
+        return "fbeta"
     if "prauc" in n or "averageprecision" in n:
         return "pr_auc"
     if "precision" in n or n == "prec":
@@ -262,15 +313,17 @@ def _stage_tick_label(stage_num: int) -> str:
 
 
 def _summary_from_wide(df: pd.DataFrame, stage_col: str) -> pd.DataFrame:
-    metrics = ["f1", "precision", "recall", "pr_auc"]
+    metrics = ["f1", "fbeta", "precision", "recall", "pr_auc"]
     mean_aliases = {
         "f1": ["mean_f1", "f1_mean", "f1", "f1score", "f1_score"],
+        "fbeta": ["mean_fbeta", "fbeta_mean", "fbeta", "f2", "f2_score", "f2mean"],
         "precision": ["mean_precision", "precision_mean", "precision", "prec"],
         "recall": ["mean_recall", "recall_mean", "recall", "tpr"],
         "pr_auc": ["mean_pr_auc", "pr_auc_mean", "pr_auc", "prauc", "average_precision"],
     }
     std_aliases = {
         "f1": ["std_f1", "f1_std", "std_f1score"],
+        "fbeta": ["std_fbeta", "fbeta_std", "std_f2", "f2_std"],
         "precision": ["std_precision", "precision_std", "std_prec"],
         "recall": ["std_recall", "recall_std", "std_tpr"],
         "pr_auc": ["std_pr_auc", "pr_auc_std", "std_prauc"],
@@ -415,7 +468,14 @@ def _plot_metric_panel(ax, metric_map: Dict[int, Tuple[float, float, str]], titl
     ax.axvline(1.5, color=FG_COLOR, alpha=0.12, linewidth=0.8)
 
 
-def _plot_kpi_panel(ax, summary: pd.DataFrame, fold_d21: List[float], fold_d43: List[float]) -> None:
+def _plot_kpi_panel(
+    ax,
+    summary: pd.DataFrame,
+    fold_d21: List[float],
+    fold_d43: List[float],
+    metric_key: str,
+    metric_short: str,
+) -> None:
     _style_axis(ax, "KPI DELTAS")
     ax.set_xticks([])
     ax.set_yticks([])
@@ -452,13 +512,13 @@ def _plot_kpi_panel(ax, summary: pd.DataFrame, fold_d21: List[float], fold_d43: 
         if note:
             ax.text(xy[0] + 0.04, xy[1] + 0.10, note, transform=ax.transAxes, color=FG_COLOR, fontsize=11, alpha=0.8)
 
-    f1_map = _metric_by_stage(summary, "f1")
+    metric_map = _metric_by_stage(summary, metric_key)
     d21 = None
     d43 = None
-    if 1 in f1_map and 2 in f1_map:
-        d21 = f1_map[2][0] - f1_map[1][0]
-    if 3 in f1_map and 4 in f1_map:
-        d43 = f1_map[4][0] - f1_map[3][0]
+    if 1 in metric_map and 2 in metric_map:
+        d21 = metric_map[2][0] - metric_map[1][0]
+    if 3 in metric_map and 4 in metric_map:
+        d43 = metric_map[4][0] - metric_map[3][0]
 
     note21 = None
     if fold_d21:
@@ -469,7 +529,7 @@ def _plot_kpi_panel(ax, summary: pd.DataFrame, fold_d21: List[float], fold_d43: 
         (0.06, 0.56),
         0.88,
         0.34,
-        "DELTA F1 S2-S1",
+        f"DELTA {metric_short} S2-S1",
         f"{d21:+.3f}" if d21 is not None else "n/a",
         note21,
     )
@@ -483,13 +543,20 @@ def _plot_kpi_panel(ax, summary: pd.DataFrame, fold_d21: List[float], fold_d43: 
         (0.06, 0.12),
         0.88,
         0.34,
-        "DELTA F1 S4-S3",
+        f"DELTA {metric_short} S4-S3",
         f"{d43:+.3f}" if d43 is not None else "n/a",
         note43,
     )
 
 
-def plot_figA(summary: pd.DataFrame, df_raw: pd.DataFrame, strict_tag: bool, outbase: Path) -> None:
+def plot_figA(
+    summary: pd.DataFrame,
+    df_raw: pd.DataFrame,
+    strict_tag: bool,
+    outbase: Path,
+    primary_metric: str,
+    beta: float | None,
+) -> None:
     fig = plt.figure(figsize=(16, 10))
     fig.patch.set_facecolor(BG_COLOR)
     _add_header(
@@ -514,13 +581,15 @@ def plot_figA(summary: pd.DataFrame, df_raw: pd.DataFrame, strict_tag: bool, out
     ax3 = fig.add_subplot(gs[1, 0])
     ax4 = fig.add_subplot(gs[1, 1])
 
-    _plot_metric_panel(ax1, _metric_by_stage(summary, "f1"), "F1 (Pit-stop class)")
+    metric_label = _format_metric_label(primary_metric, beta)
+    metric_short = _metric_short(primary_metric, beta)
+    _plot_metric_panel(ax1, _metric_by_stage(summary, primary_metric), metric_label)
     _plot_metric_panel(ax2, _metric_by_stage(summary, "pr_auc"), "PR-AUC")
     _plot_metric_panel(ax3, _metric_by_stage(summary, "recall"), "Recall")
 
     stage_col = _detect_stage_col(df_raw)
-    fold_d21, fold_d43 = _extract_fold_deltas(df_raw, stage_col, metric="f1")
-    _plot_kpi_panel(ax4, summary, fold_d21, fold_d43)
+    fold_d21, fold_d43 = _extract_fold_deltas(df_raw, stage_col, metric=primary_metric)
+    _plot_kpi_panel(ax4, summary, fold_d21, fold_d43, primary_metric, metric_short)
 
     _save_fig(fig, outbase)
     plt.close(fig)
@@ -585,52 +654,79 @@ def _gain_strip(ax, deltas: List[float], label: str, mean_fallback: float | None
     ax.set_xlim(min_val - pad, max_val + pad)
 
 
-def plot_figB(summary: pd.DataFrame, df_raw: pd.DataFrame, strict_tag: bool, outbase: Path) -> None:
+def plot_figB(
+    summary: pd.DataFrame,
+    df_raw: pd.DataFrame,
+    strict_tag: bool,
+    outbase: Path,
+    primary_metric: str,
+    beta: float | None,
+) -> None:
     fig = plt.figure(figsize=(12, 8))
     fig.patch.set_facecolor(BG_COLOR)
-    _add_header(fig, "Improvement Consistency", "Delta F1 across unseen races (GroupKFold by race)", strict_tag)
+    metric_short = _metric_short(primary_metric, beta)
+    _add_header(
+        fig,
+        "Improvement Consistency",
+        f"Delta {metric_short} across unseen races (GroupKFold by race)",
+        strict_tag,
+    )
     gs = fig.add_gridspec(2, 1, left=0.07, right=0.95, bottom=0.08, top=0.84, hspace=0.18)
     ax_top = fig.add_subplot(gs[0, 0])
     ax_bot = fig.add_subplot(gs[1, 0])
 
     stage_col = _detect_stage_col(df_raw)
-    fold_d21, fold_d43 = _extract_fold_deltas(df_raw, stage_col, metric="f1")
+    fold_d21, fold_d43 = _extract_fold_deltas(df_raw, stage_col, metric=primary_metric)
 
-    f1_map = _metric_by_stage(summary, "f1")
-    mean_d21 = f1_map[2][0] - f1_map[1][0] if 1 in f1_map and 2 in f1_map else None
-    mean_d43 = f1_map[4][0] - f1_map[3][0] if 3 in f1_map and 4 in f1_map else None
+    metric_map = _metric_by_stage(summary, primary_metric)
+    mean_d21 = metric_map[2][0] - metric_map[1][0] if 1 in metric_map and 2 in metric_map else None
+    mean_d43 = metric_map[4][0] - metric_map[3][0] if 3 in metric_map and 4 in metric_map else None
 
     note21 = None if fold_d21 else "mean-only (no fold detail available)"
     note43 = None if fold_d43 else "mean-only (no fold detail available)"
 
-    _gain_strip(ax_top, fold_d21, "Stage 2 minus Stage 1 (RefData)", mean_d21, note21)
-    _gain_strip(ax_bot, fold_d43, "Stage 4 minus Stage 3 (MyData+W)", mean_d43, note43)
+    _gain_strip(ax_top, fold_d21, f"Stage 2 minus Stage 1 ({metric_short} - RefData)", mean_d21, note21)
+    _gain_strip(ax_bot, fold_d43, f"Stage 4 minus Stage 3 ({metric_short} - MyData+W)", mean_d43, note43)
 
     _save_fig(fig, outbase)
     plt.close(fig)
 
 
-def plot_figC(summary: pd.DataFrame, strict_tag: bool, outbase: Path) -> None:
+def plot_figC(
+    summary: pd.DataFrame,
+    strict_tag: bool,
+    outbase: Path,
+    primary_metric: str,
+    beta: float | None,
+) -> None:
     fig = plt.figure(figsize=(12, 6))
     fig.patch.set_facecolor(BG_COLOR)
     _add_header(
         fig,
         "Stage Comparison - Slide Friendly",
-        "GroupKFold by race (unseen races) - RefTech vs MyMethod (F1)",
+        f"GroupKFold by race (unseen races) - RefTech vs MyMethod ({_metric_short(primary_metric, beta)})",
         strict_tag,
     )
     ax = fig.add_axes([0.08, 0.14, 0.86, 0.68])
-    _style_axis(ax, "F1 DUMBBELL")
+    _style_axis(ax, f"{_metric_short(primary_metric, beta)} DUMBBELL")
 
-    f1_map = _metric_by_stage(summary, "f1")
-    if not f1_map:
-        ax.text(0.5, 0.5, "F1 unavailable", color=FG_COLOR, fontsize=14, ha="center", va="center")
+    metric_map = _metric_by_stage(summary, primary_metric)
+    if not metric_map:
+        ax.text(
+            0.5,
+            0.5,
+            f"{_metric_short(primary_metric, beta)} unavailable",
+            color=FG_COLOR,
+            fontsize=14,
+            ha="center",
+            va="center",
+        )
         _save_fig(fig, outbase)
         plt.close(fig)
         return
 
     def _val(stage_num: int) -> float | None:
-        return f1_map[stage_num][0] if stage_num in f1_map else None
+        return metric_map[stage_num][0] if stage_num in metric_map else None
 
     pairs = [
         ("RefData", _val(1), _val(2)),
@@ -653,7 +749,7 @@ def plot_figC(summary: pd.DataFrame, strict_tag: bool, outbase: Path) -> None:
     ax.set_ylim(0, 1.0)
     ax.set_xticks([x_left, x_right])
     ax.set_xticklabels(["REFTECH", "MYMETHOD"], color=FG_COLOR, fontsize=14, fontweight="bold")
-    ax.set_ylabel("F1 (Pit-stop class)", color=FG_COLOR, fontsize=14)
+    ax.set_ylabel(_format_metric_label(primary_metric, beta), color=FG_COLOR, fontsize=14)
 
     _save_fig(fig, outbase)
     plt.close(fig)
@@ -663,6 +759,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Generate pit wall broadcast summary figures.")
     parser.add_argument("--in_csv", required=True, help="Path to stage_summary.csv")
     parser.add_argument("--outdir", required=True, help="Output directory for pit wall figures")
+    parser.add_argument(
+        "--primary_metric",
+        default="f1",
+        help="Primary metric for comparisons: f1, fbeta, or f2.",
+    )
+    parser.add_argument("--beta", type=float, default=None, help="Beta value for Fbeta/F2 labeling.")
     args = parser.parse_args()
 
     in_csv = Path(args.in_csv)
@@ -683,18 +785,40 @@ def main() -> None:
         print(f"[ERROR] CSV is empty: {in_csv}")
         sys.exit(1)
 
+    fold_df = None
+    fold_csv = in_csv.with_name("stage_folds_strict.csv")
+    if fold_csv.exists():
+        try:
+            fold_df = pd.read_csv(fold_csv)
+            if fold_df.empty:
+                fold_df = None
+        except Exception:
+            fold_df = None
+
     try:
         summary = load_summary(df)
     except ValueError as exc:
         print(f"[ERROR] {exc}")
         sys.exit(1)
 
+    primary_metric = args.primary_metric.strip().lower()
+    if primary_metric == "f2":
+        primary_metric = "fbeta"
+    if primary_metric not in {"f1", "fbeta"}:
+        print(f"[ERROR] Unsupported primary metric: {args.primary_metric}")
+        sys.exit(1)
+
+    beta = args.beta if args.beta is not None else _extract_beta(df)
+    if primary_metric == "fbeta" and beta is None:
+        beta = 2.0
+
     strict_csv = in_csv.with_name("stage_summary_strict.csv")
     strict_tag = "strict" in in_csv.stem.lower() or strict_csv.exists()
+    df_raw = fold_df if fold_df is not None else df
 
-    plot_figA(summary, df, strict_tag, outdir / "pitwall_figA_overview")
-    plot_figB(summary, df, strict_tag, outdir / "pitwall_figB_consistency")
-    plot_figC(summary, strict_tag, outdir / "pitwall_figC_slide")
+    plot_figA(summary, df_raw, strict_tag, outdir / "pitwall_figA_overview", primary_metric, beta)
+    plot_figB(summary, df_raw, strict_tag, outdir / "pitwall_figB_consistency", primary_metric, beta)
+    plot_figC(summary, strict_tag, outdir / "pitwall_figC_slide", primary_metric, beta)
 
 
 if __name__ == "__main__":

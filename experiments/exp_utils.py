@@ -36,6 +36,117 @@ def safe_numeric(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def add_feature_engineering(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    new_cols: List[str] = []
+
+    def _num(col: str) -> pd.Series | None:
+        if col not in out.columns:
+            return None
+        return pd.to_numeric(out[col], errors="coerce")
+
+    def _safe_div(a: pd.Series, b: pd.Series, eps: float = 1e-6) -> pd.Series:
+        b_vals = b.astype(float).to_numpy()
+        b_vals = np.where(np.abs(b_vals) < eps, eps, b_vals)
+        return pd.Series(a.astype(float).to_numpy() / b_vals, index=a.index)
+
+    def _add(col: str, series: pd.Series | None) -> None:
+        if series is None:
+            return
+        if col in out.columns:
+            return
+        out[col] = series
+        new_cols.append(col)
+
+    # Weather and track features (prev)
+    air = _num("AirTemp_prev")
+    track = _num("TrackTemp_prev")
+    if air is not None and track is not None:
+        _add("TempDelta_prev", track - air)
+
+    humidity = _num("Humidity_prev")
+    rainfall = _num("Rainfall_prev")
+    if humidity is not None and rainfall is not None:
+        _add("HumidityRain_prev", humidity * (rainfall > 0).astype(float))
+
+    wind_dir = _num("WindDirection_prev")
+    if wind_dir is not None:
+        rad = np.deg2rad(wind_dir.astype(float))
+        _add("WindDirSin_prev", pd.Series(np.sin(rad), index=wind_dir.index))
+        _add("WindDirCos_prev", pd.Series(np.cos(rad), index=wind_dir.index))
+
+    # Stint and wear features (prev)
+    stint_laps = _num("stint_laps_prev")
+    tyre_wear = _num("tyre_wear_pct_prev")
+    if stint_laps is not None and tyre_wear is not None:
+        _add("WearPerLap_prev", _safe_div(tyre_wear, stint_laps))
+
+    nolaps = _num("nolaps_prev")
+    lapno = _num("lapno_prev")
+    if nolaps is not None and lapno is not None:
+        _add("LapsRemaining_prev", nolaps - lapno)
+
+    if stint_laps is not None and nolaps is not None:
+        _add("StintProgress_prev", _safe_div(stint_laps, nolaps))
+
+    # Gap dynamics (prev)
+    gap_leader = _num("gap_to_leader_prev")
+    gap_front = _num("gap_to_front_prev")
+    gap_behind = _num("gap_to_behind_prev")
+    if gap_front is not None and gap_behind is not None:
+        _add("GapFrontOverBehind_prev", _safe_div(gap_front, gap_behind))
+        _add("GapDelta_prev", gap_front - gap_behind)
+    if gap_leader is not None and gap_front is not None:
+        _add("GapLeaderOverFront_prev", _safe_div(gap_leader, gap_front))
+
+    gap_after_pit = _num("gap_after_pit_vs_behind_prev")
+    if gap_after_pit is not None and gap_behind is not None:
+        _add("GapAfterPitMargin_prev", gap_after_pit - gap_behind)
+
+    undercut = _num("undercut_potential_prev")
+    pit_window = _num("in_pit_window_prev")
+    if undercut is not None and pit_window is not None:
+        _add("UndercutPressure_prev", undercut * pit_window)
+
+    # Pace deltas (prev)
+    delta_best = _num("delta_best_so_far_prev")
+    delta_interval = _num("delta_interval_prev")
+    if delta_best is not None and delta_interval is not None:
+        _add("DeltaBestOverInterval_prev", _safe_div(delta_best, delta_interval))
+
+    rel_pace = _num("relative_pace_prev")
+    if rel_pace is not None and gap_front is not None:
+        _add("PaceGap_prev", rel_pace * gap_front)
+
+    # Safety car flags (prev)
+    sc = _num("sc_active_prev")
+    vsc = _num("vsc_active_prev")
+    if sc is not None and vsc is not None:
+        _add("SCAny_prev", ((sc > 0) | (vsc > 0)).astype(float))
+
+    # Reference dataset extras (non-prev)
+    gap = _num("gap")
+    interval = _num("interval")
+    if gap is not None and interval is not None:
+        _add("GapOverInterval", _safe_div(gap, interval))
+
+    pit_so_far = _num("pitstops_so_far")
+    pit_rem = _num("pitstops_remaining")
+    if pit_so_far is not None and pit_rem is not None:
+        _add("PitstopBalance", pit_rem - pit_so_far)
+
+    sc_now = _num("sc_active")
+    vsc_now = _num("vsc_active")
+    if sc_now is not None and vsc_now is not None:
+        _add("SCAny", ((sc_now > 0) | (vsc_now > 0)).astype(float))
+
+    for c in new_cols:
+        if out[c].isna().all():
+            out = out.drop(columns=[c])
+
+    return out
+
+
 def _normalize(s: str) -> str:
     return "".join(ch.lower() for ch in s if ch.isalnum())
 

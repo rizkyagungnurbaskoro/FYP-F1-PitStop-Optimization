@@ -58,6 +58,22 @@ def add_feature_engineering(df: pd.DataFrame) -> pd.DataFrame:
         out[col] = series
         new_cols.append(col)
 
+    def _alias_missing(base_col: str, src_col: str) -> None:
+        if base_col in out.columns or src_col not in out.columns:
+            return
+        _add(base_col, _num(src_col))
+
+    # Backfill ref-style columns from *_prev where available (Stage 3/4 alignment).
+    _alias_missing("lapno", "lapno_prev")
+    _alias_missing("race_progress", "race_progress_prev")
+    _alias_missing("pitstops_so_far", "pitstops_so_far_prev")
+    _alias_missing("sc_active", "sc_active_prev")
+    _alias_missing("vsc_active", "vsc_active_prev")
+    _alias_missing("gap", "gap_to_leader_prev")
+    _alias_missing("interval", "gap_to_front_prev")
+    _alias_missing("position", "Position_prev")
+    _alias_missing("tireage", "stint_laps_prev")
+
     # Weather and track features (prev)
     air = _num("AirTemp_prev")
     track = _num("TrackTemp_prev")
@@ -85,9 +101,29 @@ def add_feature_engineering(df: pd.DataFrame) -> pd.DataFrame:
     lapno = _num("lapno_prev")
     if nolaps is not None and lapno is not None:
         _add("LapsRemaining_prev", nolaps - lapno)
+        lap_progress = _safe_div(lapno, nolaps)
+        _add("LapProgress_prev", lap_progress)
+        _add("LapProgressRemaining_prev", 1.0 - lap_progress)
 
     if stint_laps is not None and nolaps is not None:
         _add("StintProgress_prev", _safe_div(stint_laps, nolaps))
+
+    race_prog = _num("race_progress_prev")
+    if race_prog is not None:
+        _add("RaceProgressRemaining_prev", 1.0 - race_prog.astype(float))
+    if tyre_wear is not None and race_prog is not None:
+        _add("WearProgress_prev", tyre_wear * race_prog)
+        _add("WearToProgress_prev", _safe_div(tyre_wear, race_prog))
+
+    pit_window = _num("in_pit_window_prev")
+    if pit_window is not None and race_prog is not None:
+        _add("PitWindowProgress_prev", pit_window * race_prog)
+    if pit_window is not None and tyre_wear is not None:
+        _add("PitWindowWear_prev", pit_window * tyre_wear)
+
+    pitstops_so_far = _num("pitstops_so_far_prev")
+    if pitstops_so_far is not None and lapno is not None:
+        _add("PitstopRate_prev", _safe_div(pitstops_so_far, lapno))
 
     # Gap dynamics (prev)
     gap_leader = _num("gap_to_leader_prev")
@@ -96,27 +132,46 @@ def add_feature_engineering(df: pd.DataFrame) -> pd.DataFrame:
     if gap_front is not None and gap_behind is not None:
         _add("GapFrontOverBehind_prev", _safe_div(gap_front, gap_behind))
         _add("GapDelta_prev", gap_front - gap_behind)
+    if gap_front is not None and lapno is not None:
+        _add("GapFrontPerLap_prev", _safe_div(gap_front, lapno))
+    if gap_behind is not None and lapno is not None:
+        _add("GapBehindPerLap_prev", _safe_div(gap_behind, lapno))
     if gap_leader is not None and gap_front is not None:
         _add("GapLeaderOverFront_prev", _safe_div(gap_leader, gap_front))
+    if gap_leader is not None and lapno is not None:
+        _add("LeaderGapPerLap_prev", _safe_div(gap_leader, lapno))
 
     gap_after_pit = _num("gap_after_pit_vs_behind_prev")
     if gap_after_pit is not None and gap_behind is not None:
         _add("GapAfterPitMargin_prev", gap_after_pit - gap_behind)
 
     undercut = _num("undercut_potential_prev")
-    pit_window = _num("in_pit_window_prev")
     if undercut is not None and pit_window is not None:
         _add("UndercutPressure_prev", undercut * pit_window)
+    if undercut is not None and gap_behind is not None:
+        _add("UndercutVsGap_prev", _safe_div(undercut, gap_behind))
 
     # Pace deltas (prev)
     delta_best = _num("delta_best_so_far_prev")
     delta_interval = _num("delta_interval_prev")
     if delta_best is not None and delta_interval is not None:
         _add("DeltaBestOverInterval_prev", _safe_div(delta_best, delta_interval))
+        _add("DeltaBestMinusInterval_prev", delta_best - delta_interval)
 
     rel_pace = _num("relative_pace_prev")
     if rel_pace is not None and gap_front is not None:
         _add("PaceGap_prev", rel_pace * gap_front)
+        _add("PaceToGap_prev", _safe_div(rel_pace, gap_front))
+
+    # Weather extras (prev)
+    pressure = _num("Pressure_prev")
+    if pressure is not None and track is not None:
+        _add("PressureToTrackTemp_prev", _safe_div(pressure, track))
+    wind_speed = _num("WindSpeed_prev")
+    if wind_speed is not None and rainfall is not None:
+        _add("WindRain_prev", wind_speed * rainfall)
+    if rainfall is not None:
+        _add("RainFlag_prev", (rainfall > 0).astype(float))
 
     # Safety car flags (prev)
     sc = _num("sc_active_prev")
@@ -227,3 +282,28 @@ def build_feature_list(df: pd.DataFrame, target_col: str, group_col: str) -> Lis
     if not feats:
         raise ValueError("No features left after dropping target/group/leakage columns.")
     return feats
+
+
+def select_canonical_features(
+    df: pd.DataFrame,
+    features: List[str],
+    target_col: str,
+    group_col: str,
+    mapping: Dict[str, str],
+    canonical_features: List[str],
+) -> tuple[pd.DataFrame, List[str]]:
+    selected: Dict[str, str] = {}
+    for col in features:
+        canonical = mapping.get(col, col)
+        if canonical in canonical_features and canonical not in selected:
+            selected[canonical] = col
+
+    if not selected:
+        raise ValueError("No canonical features found for alignment.")
+
+    ordered = [c for c in canonical_features if c in selected]
+    cols = [selected[c] for c in ordered]
+    df_out = df[[target_col, group_col] + cols].copy()
+    rename_map = {selected[c]: c for c in ordered}
+    df_out = df_out.rename(columns=rename_map)
+    return df_out, ordered

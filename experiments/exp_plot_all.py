@@ -86,6 +86,18 @@ def _load_all(paths):
     return m1, m2, m3, m4
 
 
+def _load_all_standard(paths):
+    m1 = read_json(paths.out_replication / "metrics.json")
+    m2 = read_json(paths.out_refdata_mymethod / "metrics.json")
+    std_ref = paths.results_dir / "standard_mydata_reftech" / "metrics.json"
+    std_my = paths.results_dir / "standard_mydata_mymethod" / "metrics.json"
+    if not std_ref.exists() or not std_my.exists():
+        return None
+    m3 = read_json(std_ref)
+    m4 = read_json(std_my)
+    return m1, m2, m3, m4
+
+
 def _stage_colors() -> list[str]:
     return [BAR_COLOR, ACCENT, BAR_COLOR, ACCENT]
 
@@ -278,6 +290,39 @@ def write_summary_csv(m1, m2, m3, m4, outpath: Path) -> None:
     pd.DataFrame(rows).to_csv(outpath, index=False)
 
 
+def write_summary_csv_basic(m1, m2, m3, m4, outpath: Path, evaluation: str | None = None) -> None:
+    rows = []
+    stages = [
+        ("Stage 1: RefTech on RefData", m1),
+        ("Stage 2: MyMethod on RefData", m2),
+        ("Stage 3: RefTech on MyData+W", m3),
+        ("Stage 4: MyMethod on MyData+W", m4),
+    ]
+    for name, m in stages:
+        prec_mu, prec_sd = _mean_std(m, "precision")
+        rec_mu, rec_sd = _mean_std(m, "recall")
+        f1_mu, f1_sd = m["mean_f1"], m["std_f1"]
+        folds = m.get("folds", [])
+        total_pos = sum(f.get("support_pos", 0) for f in folds) if folds else 0
+        total_neg = sum(f.get("support_neg", 0) for f in folds) if folds else 0
+        rows.append(
+            dict(
+                stage=name,
+                mean_f1=f1_mu,
+                std_f1=f1_sd,
+                mean_precision=prec_mu,
+                std_precision=prec_sd,
+                mean_recall=rec_mu,
+                std_recall=rec_sd,
+                total_pos=int(total_pos),
+                total_neg=int(total_neg),
+                n_folds=m.get("n_splits", 5),
+                evaluation=evaluation if evaluation else "",
+            )
+        )
+    pd.DataFrame(rows).to_csv(outpath, index=False)
+
+
 def write_fold_csv(m1, m2, m3, m4, outpath: Path) -> None:
     rows = []
     stages = [
@@ -355,9 +400,31 @@ def main() -> None:
             paths.out_summary_plots / "delta_fbeta_stage4_minus_stage3.png",
         )
 
-    # Summary table
+    # Summary table (strict)
     write_summary_csv(m1, m2, m3, m4, paths.out_summary_plots / "stage_summary_strict.csv")
     write_fold_csv(m1, m2, m3, m4, paths.out_summary_plots / "stage_folds_strict.csv")
+
+    standard = _load_all_standard(paths)
+    if standard is not None:
+        s1, s2, s3, s4 = standard
+        write_summary_csv_basic(
+            s1,
+            s2,
+            s3,
+            s4,
+            paths.out_summary_plots / "stage_summary.csv",
+            evaluation="standard",
+        )
+        write_fold_csv(s1, s2, s3, s4, paths.out_summary_plots / "stage_folds_standard.csv")
+    else:
+        write_summary_csv_basic(
+            m1,
+            m2,
+            m3,
+            m4,
+            paths.out_summary_plots / "stage_summary.csv",
+            evaluation="strict",
+        )
 
     print("[OK] Saved plots + CSV summary to:", paths.out_summary_plots)
 

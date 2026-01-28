@@ -72,14 +72,47 @@ def get_context(sel: Selection) -> dict[str, Any]:
         
         years = prep.get("years", [])
         
+        lap_min = prep.get("lap_min", 1)
+        lap_max = prep.get("lap_max", 70)
+        
+        win_start, win_end = None, None
+        # Recalculate lap_max specifically for the selected circuit to avoid global '77' issue
+        if sel.circuit and prep.get("circuit_col") in prep["df"].columns:
+            circuit_df = prep["df"][prep["df"][prep["circuit_col"]].astype(str) == sel.circuit]
+            
+            # Filter by weather if selected to restrict slider to relevant laps
+            if sel.weather and not circuit_df.empty:
+                from ..demo import _derive_weather_label
+                # Create a temporary column for alignment if needed
+                temp_weather = _derive_weather_label(circuit_df)
+                circuit_df = circuit_df[temp_weather == sel.weather]
+
+            if not circuit_df.empty:
+                from ..demo import _lap_range
+                from ..model import pit_window_bounds
+                bounds = _lap_range(circuit_df, prep.get("lap_col"))
+                if bounds:
+                    lap_min, circuit_lap_max = bounds
+                    lap_max = circuit_lap_max
+                    
+                # Calculate a default window for the circuit
+                try:
+                    window = pit_window_bounds(circuit_df, prep.get("lap_col"), total_laps_hint=lap_max, current_lap=lap_min)
+                    if window:
+                        win_start, win_end = window
+                except Exception:
+                    pass
+
         return _normalize_obj({
             "selection": selection,
             "drivers": opts.get("drivers", []),
             "circuits": opts.get("circuits", []),
             "weather_vals": opts.get("weather_vals", []),
             "years": years,
-            "lap_min": prep.get("lap_min", 1),
-            "lap_max": prep.get("lap_max", 70),
+            "lap_min": lap_min,
+            "lap_max": lap_max,
+            "window_start": win_start,
+            "window_end": win_end,
             "default_year": prep.get("default_year"),
         })
     except Exception as e:
@@ -220,7 +253,8 @@ def get_iconic() -> dict[str, Any]:
                 int(row.get("lapno", 0)),
                 "lapno",
                 prep["tire_max"],
-                prep["lookahead_laps"]
+                prep["lookahead_laps"],
+                df_context=df
              )
              
              # Determine historical Move using 'decide_pitstop' (1 = Pit)

@@ -56,6 +56,16 @@ export default function ExploreClient() {
                 lap_max: res.lap_max ?? prev.lap_max
             }));
 
+            // Pre-initialize windowInfo if backend provided strategic bounds
+            if (res.window_start !== undefined && res.window_end !== undefined) {
+                setWindowInfo((prev: any) => ({
+                    ...prev,
+                    window_start: res.window_start,
+                    window_end: res.window_end,
+                    pit_window_text: prev?.pit_window_text || "Predicted Window"
+                }));
+            }
+
             if (!isInit) {
                 if (res.drivers && !res.drivers.includes(driver)) {
                     setDriver(res.drivers[0] || "");
@@ -83,10 +93,18 @@ export default function ExploreClient() {
     }, []);
 
     useEffect(() => {
-        if (year || circuit) {
+        if (year || circuit || weather) {
             fetchContext(false);
         }
-    }, [year, circuit]);
+    }, [year, circuit, weather]);
+
+    // Clamp lap if it falls outside new bounds
+    useEffect(() => {
+        if (meta.lap_min !== undefined && meta.lap_max !== undefined) {
+            if (lap < meta.lap_min) setLap(meta.lap_min);
+            else if (lap > meta.lap_max) setLap(meta.lap_max);
+        }
+    }, [meta.lap_min, meta.lap_max, lap]);
 
     // Run Scenario
     const runScenario = async () => {
@@ -114,7 +132,7 @@ export default function ExploreClient() {
 
     return (
         <div style={{ maxWidth: 1400, margin: "0 auto", paddingBottom: 60, fontFamily: "var(--font-oxanium)" }}>
-            <BroadcastHeader />
+            <BroadcastHeader circuit={circuit} />
             <LiveTicker />
 
             <div className="section">
@@ -222,7 +240,8 @@ export default function ExploreClient() {
                                     <ContextChips ctx={{
                                         sc_active: telemetry?.test_row?.sc_active,
                                         vsc_active: telemetry?.test_row?.vsc_active,
-                                        rain: weather === "Wet" || telemetry?.test_row?.rain > 0,
+                                        rain: weather === "Wet" || !!telemetry?.test_row?.Rainfall_prev || telemetry?.test_row?.rain > 0,
+                                        weather_status: telemetry?.test_row?.weather_status || decision?.model?.payload?.weather_status,
                                         track_temp: telemetry?.test_row?.track_temp,
                                         tire_age: telemetry?.test_row?.tire_age || telemetry?.test_row?.tyre_age,
                                         position: telemetry?.test_row?.position,
@@ -452,6 +471,13 @@ function DriverCard({ label, color, driver, item, telemetry, circuit }: any) {
     const compound = (telemetry?.compound && telemetry.compound.toUpperCase() !== "UNKNOWN") ? telemetry.compound : "MEDIUM";
     const tireAge = telemetry?.tire_age || telemetry?.stint_laps || 0;
 
+    // Emulated / Mapped performance data
+    const lapTime = telemetry?.lap_time || "--:--.---";
+    const s1 = telemetry?.s1 || "--.---";
+    const s2 = telemetry?.s2 || "--.---";
+    const s3 = telemetry?.s3 || "--.---";
+    const topSpeed = telemetry?.top_speed || telemetry?.speed || 0;
+
     return (
         <div style={{
             color: "#fff",
@@ -504,6 +530,33 @@ function DriverCard({ label, color, driver, item, telemetry, circuit }: any) {
                     <div style={{ height: 4, width: "100%", background: "#333", borderRadius: 2, marginTop: 6, overflow: "hidden" }}>
                         <div style={{ height: "100%", width: `${telemetry?.tire_wear_pct ? (Number(telemetry.tire_wear_pct) * 100) : (tireAge / 35 * 100)}%`, background: primaryColor }}></div>
                     </div>
+                </div>
+            </div>
+
+            {/* Performance Stats Overlay */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20, marginBottom: 20, padding: "12px", background: "rgba(0,0,0,0.2)", borderRadius: 8 }}>
+                <div>
+                    <div style={{ fontSize: "0.6rem", color: "#6e7888", marginBottom: 2 }}>BEST LAP</div>
+                    <div style={{ fontSize: "1.2rem", fontWeight: 800, color: "#FFD700" }}>{lapTime}</div>
+                </div>
+                <div>
+                    <div style={{ fontSize: "0.6rem", color: "#6e7888", marginBottom: 2 }}>TOP SPEED</div>
+                    <div style={{ fontSize: "1.2rem", fontWeight: 800 }}>{Math.round(topSpeed)} km/h</div>
+                </div>
+            </div>
+
+            <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
+                <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: "0.6rem", color: "#FF2B2B", marginBottom: 2 }}>S1</div>
+                    <div style={{ fontSize: "0.9rem", fontWeight: 700 }}>{s1}</div>
+                </div>
+                <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: "0.6rem", color: "#8B5CF6", marginBottom: 2 }}>S2</div>
+                    <div style={{ fontSize: "0.9rem", fontWeight: 700 }}>{s2}</div>
+                </div>
+                <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: "0.6rem", color: "#F1C232", marginBottom: 2 }}>S3</div>
+                    <div style={{ fontSize: "0.9rem", fontWeight: 700 }}>{s3}</div>
                 </div>
             </div>
 

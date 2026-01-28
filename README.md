@@ -13,7 +13,7 @@ The project addresses the extreme cognitive load placed on race engineers [4][19
 ---
 
 ## 🚀 Key Features
-- **Predictive Modeling**: High-accuracy XGBoost classifier trained on historical 2021-2024 telemetry data [7].
+- **Predictive Modeling**: High-accuracy XGBoost classifier trained on a comprehensive **2014-2024** dataset, bridging legacy technical regulations and modern "Ground Effect" eras [7].
 - **Confident Learning**: Automated noise pruning using Cleanlab to filter out suboptimal historical human strategic calls [9].
 - **Explainable AI (XAI)**: SHAP-based justifications for every recommendation, ensuring transparency for engineers [6].
 - **Real-Time Dashboard**: A "Broadcast Style" UI built with Next.js, featuring dynamic tire degradation bars and live telemetry interpolation [18].

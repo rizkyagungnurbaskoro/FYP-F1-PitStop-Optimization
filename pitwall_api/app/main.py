@@ -180,7 +180,8 @@ def get_scenario(scenario_id: str, dataset: str = "my") -> dict[str, Any]:
     is_monaco = scenario_id.startswith("monaco_2022")
     if not is_monaco:
         context_df = _context_df(df, row)
-        window = pit_window_bounds(context_df, lap_col)
+        compound = str(row.get("compound", row.get("Compound", "MEDIUM"))).upper()
+        window = pit_window_bounds(context_df, lap_col, current_lap=lap_val, compound=compound)
         win_start, win_end = window if window else (None, None)
         try:
             context_probs = model_proba(context_df, bundle)
@@ -202,6 +203,7 @@ def get_scenario(scenario_id: str, dataset: str = "my") -> dict[str, Any]:
         lookahead_laps=4,
         window_start=win_start,
         window_end=win_end,
+        df_context=context_df,
     )
     model.recommendation = demo["decision"]
     model.threshold = float(demo["used_threshold"])
@@ -268,7 +270,8 @@ def whatif(payload: dict[str, Any]) -> dict[str, Any]:
     is_monaco = scenario_id.startswith("monaco_2022")
     if not is_monaco:
         context_df = _context_df(df, row)
-        window = pit_window_bounds(context_df, lap_col)
+        compound = str(row.get("compound", row.get("Compound", "MEDIUM"))).upper()
+        window = pit_window_bounds(context_df, lap_col, current_lap=lap_val, compound=compound)
         win_start, win_end = window if window else (None, None)
         try:
             context_probs = model_proba(context_df, bundle)
@@ -290,6 +293,7 @@ def whatif(payload: dict[str, Any]) -> dict[str, Any]:
         lookahead_laps=4,
         window_start=win_start,
         window_end=win_end,
+        df_context=context_df,
     )
     model.recommendation = demo["decision"]
     model.threshold = float(demo["used_threshold"])

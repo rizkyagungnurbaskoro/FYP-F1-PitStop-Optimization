@@ -80,37 +80,110 @@ def detect_lap_col(df: pd.DataFrame) -> str | None:
     return None
 
 
-def pit_window_bounds(df: pd.DataFrame, lap_col: str | None, total_laps_hint: int | None = None) -> tuple[int, int] | None:
+def pit_window_bounds(
+    df: pd.DataFrame,
+    lap_col: str | None,
+    total_laps_hint: int | None = None,
+    current_lap: int | None = None,
+    compound: str | None = None
+) -> tuple[int, int] | None:
     if not lap_col or lap_col not in df.columns or df.empty:
-        if total_laps_hint and total_laps_hint > 10:
-            return int(total_laps_hint * 0.22), int(total_laps_hint * 0.48)
-        return None
+        total_laps = total_laps_hint or 70
+        return _compound_fallback(compound, total_laps)
+
+    # STRATEGIC REFINEMENT: Anchor window around the NEXT historical pit stop
+    from .data import detect_decision_col
+    decision_col = detect_decision_col(df)
+    if decision_col and decision_col in df.columns:
+        # Filter pits that happen AFTER or AT the current lap (to find the next/current stop)
+        start_search = current_lap or 1
+        pits = df[
+            (pd.to_numeric(df[decision_col], errors="coerce").fillna(0) > 0) &
+            (pd.to_numeric(df[lap_col], errors="coerce") >= start_search)
+        ]
+
+        if not pits.empty:
+            laps = pd.to_numeric(pits[lap_col], errors="coerce").dropna()
+            if not laps.empty:
+                # Use the closest upcoming pit stop as the anchor
+                next_pit = int(laps.min())
+                margin = 8
+                return int(max(1, next_pit - margin)), int(next_pit + margin)
+        else:
+            # If we already pitted and there are no more pits, the window is closed/NA
+            if current_lap and current_lap > df[lap_col].max() * 0.8:
+                return None
+
+    # FALLBACK to compound-aware logic if no pits found or flags are missing
+    total_laps = total_laps_hint or (int(df[lap_col].max()) if not df[lap_col].empty else 70)
+
+    # Try to find 'in_pit_window' flags in the dataset as a secondary source
     window_col = None
     for cand in ("in_pit_window_prev", "in_pit_window", "pit_window_prev", "pit_window"):
         if cand in df.columns:
             window_col = cand
             break
-    if window_col is None:
-        return None
-    mask = pd.to_numeric(df[window_col], errors="coerce").fillna(0) > 0
-    if not mask.any():
-        return None
-    laps = pd.to_numeric(df.loc[mask, lap_col], errors="coerce").dropna()
-    if not laps.empty:
-        return int(laps.min()), int(laps.max())
-        
-    # Fallback if window_col exists but mask is empty
-    total_laps = total_laps_hint or 0
-    for cand in ("nolaps_prev", "nolaps", "n_laps", "laps", "total_laps"):
-        if cand in df.columns:
-            val = pd.to_numeric(df[cand], errors="coerce").max()
-            if pd.notna(val) and val > 10:
-                total_laps = int(val)
-                break
-    if total_laps > 10:
-        return int(total_laps * 0.22), int(total_laps * 0.48)
 
-    return None
+    if window_col is not None:
+        mask = pd.to_numeric(df[window_col], errors="coerce").fillna(0) > 0
+        # Again, only look at windows ahead of us
+        if current_lap:
+            mask = mask & (pd.to_numeric(df[lap_col], errors="coerce") >= current_lap - 5)
+
+        if mask.any():
+            laps = pd.to_numeric(df.loc[mask, lap_col], errors="coerce").dropna()
+            if not laps.empty:
+                w_start, w_end = int(laps.min()), int(laps.max())
+                # Cap overly broad windows
+                if (w_end - w_start) > (total_laps * 0.4):
+                    mid = (w_start + w_end) // 2
+                    half_width = int(total_laps * 0.15)
+                    return max(w_start, mid - half_width), min(w_end, mid + half_width)
+                return w_start, w_end
+
+    return _compound_fallback(compound, total_laps)
+
+
+def _compound_fallback(compound: str | None, total_laps: int) -> tuple[int, int]:
+    """Provides a realistic fallback pit window based on tire compound."""
+    c = str(compound).upper() if compound else "MEDIUM"
+    if "SOFT" in c:
+        return int(total_laps * 0.15), int(total_laps * 0.28)
+    if "HARD" in c:
+        return int(total_laps * 0.40), int(total_laps * 0.55)
+    # Default to Medium
+    return int(total_laps * 0.25), int(total_laps * 0.42)
+
+
+def detect_crossover_state(row: pd.Series, df_context: pd.DataFrame | None = None, lap_value: int | None = None, lap_col: str | None = None) -> str:
+    """Detects if the track is in a crossover state (Drying)."""
+    rain_now = _get_bool(row, ["Rainfall_prev", "rain", "Rain"])
+    if rain_now:
+        return "STABLE" # It's just Wet
+        
+    # Heuristic 1: Trend based (if we have context)
+    if df_context is not None and not df_context.empty and lap_value is not None:
+        l_col = lap_col or "lapno_prev"
+        if l_col in df_context.columns:
+            # Look back at the last 12 laps
+            lookback = 12
+            history = df_context[
+                (pd.to_numeric(df_context[l_col], errors="coerce") < lap_value) &
+                (pd.to_numeric(df_context[l_col], errors="coerce") >= lap_value - lookback)
+            ]
+            if not history.empty:
+                # If it was raining in the last 12 laps but not now -> Crossover
+                was_raining = any(_get_bool(r, ["Rainfall_prev", "rain", "Rain"]) for _, r in history.iterrows())
+                if was_raining:
+                    return "CROSSOVER"
+
+    # Heuristic 2: Environmental fallback
+    humidity = _get_float(row, ["Humidity_prev"]) or 50.0
+    track_temp = _get_float(row, ["TrackTemp_prev"]) or 25.0
+    if humidity > 68 and track_temp < 27:
+        return "CROSSOVER"
+        
+    return "STABLE"
 
 
 def smooth_prob_by_lap(
@@ -238,6 +311,7 @@ def demo_policy_decision(
     decision_margin: float = 0.05,
     window_start: int | None = None,
     window_end: int | None = None,
+    df_context: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     race_progress = _get_val(row, ["race_progress", "race_progress_prev"])
     if race_progress is None and "nolaps_prev" in row and lap_col and lap_col in row:
@@ -256,12 +330,18 @@ def demo_policy_decision(
 
     sc_flag = _get_val(row, ["sc_active", "sc_active_prev"])
     vsc_flag = _get_val(row, ["vsc_active", "vsc_active_prev"])
-    if sc_flag is not None and sc_flag > 0:
-        sc_text = "SC"
-    elif vsc_flag is not None and vsc_flag > 0:
-        sc_text = "VSC"
+    sc_text = "SC" if sc_flag and sc_flag > 0 else "VSC" if vsc_flag and vsc_flag > 0 else "CLEAR"
+
+    weather_val = _get_val(row, ["Rainfall_prev", "rain_flag"])
+    is_wet = weather_val and weather_val > 0
+
+    # Weather Status for UI Labeling
+    if is_wet:
+        weather_status = "Wet"
+    elif detect_crossover_state(row, df_context=df_context, lap_value=lap_value, lap_col=lap_col) == "CROSSOVER":
+        weather_status = "Crossover"
     else:
-        sc_text = "CLEAR"
+        weather_status = "Dry"
 
     tire_age = _get_val(row, ["tireage", "tireage_prev", "stint_laps_prev"])
     tire_wear_pct = None
@@ -404,6 +484,13 @@ def demo_policy_decision(
     elif net_gain_sec > 0.0:
         decision_reasons.append("COST+")
 
+    # Final Alignment: If the policy forces a higher decision, the confidence should reflect the urgency
+    final_proba = proba
+    if decision == "BOX BOX":
+        final_proba = max(proba, used_threshold + margin + 0.1)
+    elif decision == "STANDBY":
+        final_proba = max(proba, used_threshold - margin + 0.05)
+    
     decision_source = "MODEL"
     if lock_decision:
         decision_source = "POLICY"
@@ -414,10 +501,10 @@ def demo_policy_decision(
     if any(tag in decision_reasons for tag in ("COOLDOWN", "COST-", "NOWINDOW")):
         decision_source = "POLICY"
 
-    urgency = float(proba)
+    urgency = float(final_proba)
     if race_progress is not None:
         rp = float(np.clip(race_progress, 0.0, 1.0))
-        urgency = float(np.clip(0.5 * proba + 0.5 * rp, 0.0, 1.0))
+        urgency = float(np.clip(0.5 * final_proba + 0.5 * rp, 0.0, 1.0))
     else:
         rp = None
 
@@ -430,6 +517,7 @@ def demo_policy_decision(
     return {
         "decision": decision,
         "decision_source": decision_source,
+        "proba": final_proba, # Return the adjusted probability to the UI
         "used_threshold": float(used_threshold),
         "net_gain_sec": float(net_gain_sec),
         "pit_window_text": pit_window_text,
@@ -441,6 +529,7 @@ def demo_policy_decision(
         "reason_text": "+".join(decision_reasons),
         "window_start": window_start,
         "window_end": window_end,
+        "weather_status": weather_status,
     }
 
 

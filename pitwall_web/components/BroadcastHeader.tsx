@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from "react";
 
-export default function BroadcastHeader() {
+export default function BroadcastHeader({ circuit }: { circuit?: string }) {
     const [currentTime, setCurrentTime] = useState(new Date());
     const [mounted, setMounted] = useState(false);
 
@@ -13,6 +13,8 @@ export default function BroadcastHeader() {
         }, 1000);
         return () => clearInterval(timer);
     }, []);
+
+    const circuitLabel = circuit ? circuit.toUpperCase() + " GRAND PRIX" : "PITWALL STRATEGY";
 
     return (
         <div className="broadcast-header" style={{
@@ -74,7 +76,7 @@ export default function BroadcastHeader() {
                             textTransform: "uppercase",
                             lineHeight: 1
                         }}>
-                            PITWALL STRATEGY
+                            {circuitLabel}
                         </div>
                         <div style={{
                             fontSize: "0.75rem",
@@ -85,7 +87,7 @@ export default function BroadcastHeader() {
                             marginTop: 4,
                             fontFamily: "var(--font-oxanium)"
                         }}>
-                            every seconds matters
+                            {circuit ? "RACE STRATEGY OPTIMIZATION" : "every seconds matters"}
                         </div>
                     </div>
                 </div>

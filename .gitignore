@@ -12,6 +12,13 @@ build/
 venv/
 env/
 
+# JS/Web
+node_modules/
+.next/
+out/
+.vercel
+*.tsbuildinfo
+
 # IDE
 .vscode/
 .idea/
@@ -26,6 +33,15 @@ Thumbs.db
 # Experiment / outputs (adjust to your needs)
 data/
 personal_datasets/
+f1_cache/
+results/
+reports/
+cols.txt
+debug_*.txt
+*.log
+temp_data.json
+monaco_*.txt
+monaco_response.json
 
 # Logs
 *.log

@@ -1602,6 +1602,7 @@ def _eval_groupkfold(
 
     return {
         "model_kind": spec.name,
+        "split_kind": "groupkfold",
         "n_splits": n_splits,
         "threshold": float(threshold),
         "threshold_tuned": bool(tune_threshold),
@@ -1639,6 +1640,262 @@ def _eval_groupkfold(
         "std_fbeta": std_fbeta,
         "mean_pr_auc": mean_pr_auc,
         "std_pr_auc": std_pr_auc,
+        "folds": folds,
+    }
+
+
+def _eval_group_holdout(
+    df: pd.DataFrame,
+    features: List[str],
+    target_col: str,
+    group_col: str,
+    spec: ModelSpec,
+    baseline_spec: ModelSpec | None = None,
+    test_size: float = 0.3,
+    random_state: int = 42,
+    threshold: float = 0.5,
+    use_scale_pos_weight: bool = False,
+    use_feature_selection: bool = False,
+    use_target_encoding: bool = False,
+    target_encoding_specs: List[Tuple] | None = None,
+    drop_target_encoded_cols: bool = False,
+    use_balanced_subsample: bool = False,
+    neg_pos_ratio: float = 4.0,
+    subsample_random_state: int = 42,
+    fs_top_k: int = 15,
+    fs_random_state: int = 42,
+    tune_threshold: bool = False,
+    threshold_val_size: float = 0.2,
+    threshold_min: float = 0.05,
+    threshold_max: float = 0.95,
+    threshold_random_state: int = 42,
+    threshold_metric: str = "fbeta",
+    min_precision: float = 0.0,
+    beta: float = 1.0,
+    calibrate_proba: bool = False,
+    calibration_method: str = "sigmoid",
+    calibration_val_size: float = 0.2,
+    calibration_random_state: int = 42,
+    tune_params: bool = False,
+    param_candidates: List[Dict[str, Any]] | None = None,
+    tune_metric: str = "fbeta",
+    tune_val_size: float = 0.2,
+    tune_random_state: int = 42,
+    tune_cv_splits: int = 3,
+    delta_pr_auc_weight: float = 0.5,
+    delta_f1_weight: float = 0.0,
+    delta_f2_weight: float = 0.0,
+    delta_recall_weight: float = 0.0,
+    ensemble_seeds: List[int] | None = None,
+) -> Dict[str, Any]:
+    X = df[features]
+    y = df[target_col].astype(int).values
+    groups = df[group_col].values
+
+    splitter = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=random_state)
+    try:
+        tr_idx, te_idx = next(splitter.split(X, y, groups))
+    except ValueError as exc:
+        raise ValueError("Holdout split failed; check group count and test_size.") from exc
+
+    if len(tr_idx) == 0 or len(te_idx) == 0:
+        raise ValueError("Holdout split produced empty train or test set.")
+
+    dtr = df.iloc[tr_idx].copy()
+    dte = df.iloc[te_idx].copy()
+
+    tuned_params: Dict[str, Any] = {}
+    spec_fold = spec
+    if tune_params:
+        tuned_params = _select_best_params(
+            df=dtr,
+            features=features,
+            target_col=target_col,
+            group_col=group_col,
+            base_spec=spec,
+            baseline_spec=baseline_spec,
+            param_candidates=param_candidates or [],
+            use_scale_pos_weight=use_scale_pos_weight,
+            use_target_encoding=use_target_encoding,
+            target_encoding_specs=target_encoding_specs,
+            drop_target_encoded_cols=drop_target_encoded_cols,
+            use_balanced_subsample=use_balanced_subsample,
+            neg_pos_ratio=neg_pos_ratio,
+            subsample_random_state=subsample_random_state,
+            tune_metric=tune_metric,
+            beta=beta,
+            val_size=tune_val_size,
+            random_state=tune_random_state,
+            threshold_min=threshold_min,
+            threshold_max=threshold_max,
+            min_precision=min_precision,
+            tune_cv_splits=tune_cv_splits,
+            delta_pr_auc_weight=delta_pr_auc_weight,
+            delta_f1_weight=delta_f1_weight,
+            delta_f2_weight=delta_f2_weight,
+            delta_recall_weight=delta_recall_weight,
+            ensemble_seeds=ensemble_seeds,
+        )
+        if tuned_params:
+            spec_fold = ModelSpec(name=spec.name, params={**spec.params, **tuned_params})
+
+    features_fold = list(features)
+    dtr_fold = dtr
+    dte_fold = dte
+    if use_target_encoding:
+        dtr_fold, dte_fold, features_fold = _apply_target_encoding(
+            dtr, dte, target_col, features_fold, target_encoding_specs or [], drop_target_encoded_cols
+        )
+
+    if use_balanced_subsample:
+        dtr_fold = _balanced_subsample(
+            dtr_fold, target_col, neg_pos_ratio, subsample_random_state + 1
+        )
+
+    if use_feature_selection:
+        features_fold = _select_features_mi(
+            dtr_fold,
+            features_fold,
+            target_col=target_col,
+            top_k=fs_top_k,
+            random_state=fs_random_state,
+        )
+
+    if use_scale_pos_weight:
+        ytr = dtr_fold[target_col].astype(int).values
+        spec_fold = ModelSpec(
+            name=spec_fold.name,
+            params=_apply_scale_pos_weight(spec_fold.params, ytr),
+        )
+
+    tuned_threshold = threshold
+    if tune_threshold:
+        tuned_threshold = _tune_threshold(
+            df=dtr,
+            features=features_fold,
+            target_col=target_col,
+            group_col=group_col,
+            spec=spec_fold,
+            default_threshold=threshold,
+            val_size=threshold_val_size,
+            min_threshold=threshold_min,
+            max_threshold=threshold_max,
+            random_state=threshold_random_state,
+            beta=beta,
+            threshold_metric=threshold_metric,
+            min_precision=min_precision,
+            use_target_encoding=use_target_encoding,
+            target_encoding_specs=target_encoding_specs,
+            drop_target_encoded_cols=drop_target_encoded_cols,
+            use_balanced_subsample=use_balanced_subsample,
+            neg_pos_ratio=neg_pos_ratio,
+            subsample_random_state=subsample_random_state + 1,
+            calibrate_proba=calibrate_proba,
+            calibration_method=calibration_method,
+            calibration_val_size=calibration_val_size,
+            calibration_random_state=calibration_random_state + 1,
+            ensemble_seeds=ensemble_seeds,
+        )
+
+    dtr_fit = dtr_fold
+    dtr_cal = None
+    if calibrate_proba:
+        tr_idx, cal_idx = _split_calibration_indices(
+            dtr_fold,
+            target_col=target_col,
+            group_col=group_col,
+            val_size=calibration_val_size,
+            random_state=calibration_random_state + 1,
+        )
+        if tr_idx is not None and cal_idx is not None:
+            dtr_fit = dtr_fold.iloc[tr_idx].copy()
+            dtr_cal = dtr_fold.iloc[cal_idx].copy()
+
+    proba = _predict_proba_ensemble(
+        dtr_fit,
+        dtr_cal,
+        dte_fold,
+        features_fold,
+        target_col,
+        spec_fold,
+        calibrate_proba,
+        calibration_method,
+        ensemble_seeds,
+    )
+    pred = (proba >= tuned_threshold).astype(int)
+    yt = dte_fold[target_col].astype(int).values
+
+    f1 = f1_score(yt, pred, zero_division=0)
+    prec = precision_score(yt, pred, zero_division=0)
+    rec = recall_score(yt, pred, zero_division=0)
+    fbeta = _fbeta(float(prec), float(rec), beta)
+    pr_auc = average_precision_score(yt, proba) if int((yt == 1).sum()) > 0 else 0.0
+    cm = confusion_matrix(yt, pred).tolist()
+
+    train_groups = np.unique(groups[tr_idx])
+    test_groups = np.unique(groups[te_idx])
+
+    folds = [
+        {
+            "fold": 1,
+            "f1": float(f1),
+            "fbeta": float(fbeta),
+            "precision": float(prec),
+            "recall": float(rec),
+            "pr_auc": float(pr_auc),
+            "support_pos": int((yt == 1).sum()),
+            "support_neg": int((yt == 0).sum()),
+            "confusion_matrix": cm,
+            "threshold": float(tuned_threshold),
+            "tuned_params": tuned_params,
+            "feature_count": int(len(features_fold)),
+        }
+    ]
+
+    return {
+        "model_kind": spec.name,
+        "split_kind": "group_holdout",
+        "n_splits": 1,
+        "holdout_test_size": float(test_size),
+        "holdout_random_state": int(random_state),
+        "n_groups_train": int(len(train_groups)),
+        "n_groups_test": int(len(test_groups)),
+        "threshold": float(threshold),
+        "threshold_tuned": bool(tune_threshold),
+        "threshold_val_size": float(threshold_val_size),
+        "threshold_min": float(threshold_min),
+        "threshold_max": float(threshold_max),
+        "threshold_metric": threshold_metric,
+        "min_precision": float(min_precision),
+        "mean_threshold": float(tuned_threshold),
+        "std_threshold": 0.0,
+        "beta": float(beta),
+        "feature_selection": bool(use_feature_selection),
+        "feature_selection_top_k": int(fs_top_k),
+        "target_encoding": bool(use_target_encoding),
+        "drop_target_encoded_cols": bool(drop_target_encoded_cols),
+        "balanced_subsample": bool(use_balanced_subsample),
+        "neg_pos_ratio": float(neg_pos_ratio),
+        "calibrate_proba": bool(calibrate_proba),
+        "calibration_method": calibration_method,
+        "calibration_val_size": float(calibration_val_size),
+        "ensemble_size": int(len(ensemble_seeds)) if ensemble_seeds else 1,
+        "tune_params": bool(tune_params),
+        "tune_metric": tune_metric,
+        "tune_val_size": float(tune_val_size),
+        "tune_random_state": int(tune_random_state),
+        "tune_cv_splits": int(tune_cv_splits),
+        "delta_pr_auc_weight": float(delta_pr_auc_weight),
+        "delta_f1_weight": float(delta_f1_weight),
+        "delta_f2_weight": float(delta_f2_weight),
+        "delta_recall_weight": float(delta_recall_weight),
+        "param_candidates": int(len(param_candidates or [])),
+        "mean_f1": float(f1),
+        "std_f1": 0.0,
+        "mean_fbeta": float(fbeta),
+        "std_fbeta": 0.0,
+        "mean_pr_auc": float(pr_auc),
+        "std_pr_auc": 0.0,
         "folds": folds,
     }
 
@@ -1734,6 +1991,96 @@ def run_stage_strict(
         spec=spec,
         baseline_spec=baseline_spec,
         n_splits=n_splits,
+        threshold=threshold,
+        use_scale_pos_weight=use_scale_pos_weight,
+        use_feature_selection=use_feature_selection,
+        use_target_encoding=use_target_encoding,
+        target_encoding_specs=target_encoding_specs,
+        drop_target_encoded_cols=drop_target_encoded_cols,
+        use_balanced_subsample=use_balanced_subsample,
+        neg_pos_ratio=neg_pos_ratio,
+        subsample_random_state=subsample_random_state,
+        fs_top_k=fs_top_k,
+        fs_random_state=fs_random_state,
+        tune_threshold=tune_threshold,
+        threshold_val_size=threshold_val_size,
+        threshold_min=threshold_min,
+        threshold_max=threshold_max,
+        threshold_random_state=threshold_random_state,
+        threshold_metric=threshold_metric,
+        min_precision=min_precision,
+        beta=beta,
+        calibrate_proba=calibrate_proba,
+        calibration_method=calibration_method,
+        calibration_val_size=calibration_val_size,
+        calibration_random_state=calibration_random_state,
+        ensemble_seeds=ensemble_seeds,
+        tune_params=tune_params,
+        param_candidates=param_candidates,
+        tune_metric=tune_metric,
+        tune_val_size=tune_val_size,
+        tune_random_state=tune_random_state,
+        tune_cv_splits=tune_cv_splits,
+        delta_pr_auc_weight=delta_pr_auc_weight,
+        delta_f1_weight=delta_f1_weight,
+        delta_f2_weight=delta_f2_weight,
+        delta_recall_weight=delta_recall_weight,
+    )
+
+
+def run_stage_holdout(
+    df: pd.DataFrame,
+    features: List[str],
+    target_col: str,
+    group_col: str,
+    spec: ModelSpec,
+    baseline_spec: ModelSpec | None = None,
+    test_size: float = 0.3,
+    random_state: int = 42,
+    threshold: float = 0.5,
+    use_scale_pos_weight: bool = False,
+    use_feature_selection: bool = False,
+    use_target_encoding: bool = False,
+    target_encoding_specs: List[Tuple] | None = None,
+    drop_target_encoded_cols: bool = False,
+    use_balanced_subsample: bool = False,
+    neg_pos_ratio: float = 4.0,
+    subsample_random_state: int = 42,
+    fs_top_k: int = 15,
+    fs_random_state: int = 42,
+    tune_threshold: bool = False,
+    threshold_val_size: float = 0.2,
+    threshold_min: float = 0.05,
+    threshold_max: float = 0.95,
+    threshold_random_state: int = 42,
+    threshold_metric: str = "fbeta",
+    min_precision: float = 0.0,
+    beta: float = 1.0,
+    calibrate_proba: bool = False,
+    calibration_method: str = "sigmoid",
+    calibration_val_size: float = 0.2,
+    calibration_random_state: int = 42,
+    ensemble_seeds: List[int] | None = None,
+    tune_params: bool = False,
+    param_candidates: List[Dict[str, Any]] | None = None,
+    tune_metric: str = "fbeta",
+    tune_val_size: float = 0.2,
+    tune_random_state: int = 42,
+    tune_cv_splits: int = 3,
+    delta_pr_auc_weight: float = 0.5,
+    delta_f1_weight: float = 0.0,
+    delta_f2_weight: float = 0.0,
+    delta_recall_weight: float = 0.0,
+) -> Dict[str, Any]:
+    return _eval_group_holdout(
+        df=df,
+        features=features,
+        target_col=target_col,
+        group_col=group_col,
+        spec=spec,
+        baseline_spec=baseline_spec,
+        test_size=test_size,
+        random_state=random_state,
         threshold=threshold,
         use_scale_pos_weight=use_scale_pos_weight,
         use_feature_selection=use_feature_selection,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import json
 import sys
 from math import comb
@@ -21,7 +22,8 @@ try:
     from sklearn.model_selection import GroupKFold, StratifiedShuffleSplit
     from sklearn.ensemble import RandomForestClassifier
     from sklearn.linear_model import LogisticRegression
-    from sklearn.metrics import average_precision_score, f1_score, precision_score, recall_score
+    from sklearn.metrics import average_precision_score, f1_score, precision_score, recall_score, brier_score_loss
+    from sklearn.calibration import calibration_curve
     from sklearn.pipeline import Pipeline
     from sklearn.preprocessing import OneHotEncoder
     from xgboost import XGBClassifier
@@ -32,6 +34,7 @@ except Exception:
 
 SUMMARY_STRICT = ROOT / "results" / "summary_plots" / "stage_summary_strict.csv"
 SUMMARY_STD = ROOT / "results" / "summary_plots" / "stage_summary.csv"
+SUMMARY_HOLDOUT = ROOT / "results" / "summary_plots" / "stage34_holdout_summary.csv"
 FOLDS_STRICT = ROOT / "results" / "summary_plots" / "stage_folds_strict.csv"
 FOLDS_STANDARD = ROOT / "results" / "summary_plots" / "stage_folds_standard.csv"
 STAGE4_BEST_PARAMS = ROOT / "results" / "summary_plots" / "stage4_best_params.json"
@@ -48,16 +51,39 @@ METRICS = {
 DEMO_SHARED_FEATURES = [
     "season",
     "lapno",
+    "lapno_prev",
     "race_progress",
+    "race_progress_prev",
     "pitstops_so_far",
+    "pitstops_so_far_prev",
     "position",
+    "Position_prev",
     "gap",
     "interval",
+    "gap_to_leader_prev",
+    "gap_to_front_prev",
+    "gap_to_behind_prev",
+    "gap_after_pit_vs_behind_prev",
+    "undercut_potential_prev",
     "sc_active",
+    "sc_active_prev",
     "vsc_active",
+    "vsc_active_prev",
     "SCAny",
     "GapOverInterval",
     "tireage",
+    "stint_laps_prev",
+    "tyre_wear_pct_prev",
+    "relative_pace_prev",
+    "delta_best_so_far_prev",
+    "delta_interval_prev",
+    "AirTemp_prev",
+    "TrackTemp_prev",
+    "Humidity_prev",
+    "Pressure_prev",
+    "WindSpeed_prev",
+    "WindDirection_prev",
+    "Rainfall_prev",
 ]
 
 CIRCUIT_COL_CANDIDATES = [
@@ -75,30 +101,60 @@ def _inject_css() -> None:
         """
 <style>
 :root {
-  --bg1: #0b0e14;
-  --bg2: #151a23;
-  --panel: #12161f;
-  --panel-2: #0f131b;
-  --ink: #eef2f6;
-  --muted: #a6adbb;
-  --accent: #ff2b2b;
-  --accent2: #28c1d6;
-  --border: #232a36;
+  --bg1: #0b0d12;
+  --bg2: #111521;
+  --panel: #111620;
+  --panel-2: #0c111a;
+  --ink: #f5f7fb;
+  --muted: #b2bccb;
+  --accent: #e10600;
+  --accent2: #ff9d2b;
+  --accent3: #17c3ff;
+  --good: #2bd97f;
+  --warn: #ffb703;
+  --border: rgba(255,255,255,0.08);
 }
-@import url('https://fonts.googleapis.com/css2 | family=Teko:wght@400;600;700&family=Rajdhani:wght@400;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=Oxanium:wght@500;600;700&display=swap');
 html, body, [class*="css"]  {
   font-family: "Rajdhani", "Segoe UI", sans-serif;
   color: var(--ink);
 }
+.stApp h1, .stApp h2, .stApp h3, .stApp h4, .stApp h5, .stApp h6,
+.stMarkdown h1, .stMarkdown h2, .stMarkdown h3, .stMarkdown h4, .stMarkdown h5, .stMarkdown h6 {
+  font-family: "Oxanium", "Rajdhani", sans-serif;
+  letter-spacing: 0.04em;
+}
 .stApp {
   background:
-    radial-gradient(1200px 600px at 80% -10%, #1b2332 0%, rgba(0,0,0,0) 70%),
+    radial-gradient(900px 580px at 12% -10%, rgba(225,6,0,0.16) 0%, rgba(0,0,0,0) 65%),
+    radial-gradient(860px 560px at 92% -20%, rgba(23,195,255,0.12) 0%, rgba(0,0,0,0) 70%),
+    radial-gradient(700px 420px at 70% 10%, rgba(255,157,43,0.12) 0%, rgba(0,0,0,0) 68%),
     linear-gradient(135deg, var(--bg1), var(--bg2));
 }
-section[data-testid="stSidebar"] {
-  background: #0d1118;
-  border-right: 1px solid var(--border);
+section[data-testid="stAppViewContainer"]::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image: repeating-linear-gradient(
+    90deg,
+    rgba(255,255,255,0.02) 0 1px,
+    rgba(255,255,255,0.0) 1px 80px
+  );
+  opacity: 0.35;
 }
+  section[data-testid="stSidebar"] {
+    display: block;
+    background: linear-gradient(180deg, rgba(10, 12, 18, 0.98), rgba(8, 10, 16, 0.98));
+    border-right: 1px solid rgba(255, 255, 255, 0.06);
+  }
+  div[data-testid="stSidebarNav"] {
+    padding-top: 12px;
+  }
+  div[data-testid="stSidebarNav"] span {
+    font-family: "Oxanium", "Rajdhani", sans-serif;
+    letter-spacing: 0.06em;
+  }
 .topbar {
   display: flex;
   align-items: center;
@@ -106,9 +162,9 @@ section[data-testid="stSidebar"] {
   gap: 16px;
   padding: 14px 18px;
   border: 1px solid var(--border);
-  border-radius: 14px;
-  background: linear-gradient(180deg, #141a24, #0c1017);
-  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35);
+  border-radius: 18px;
+  background: linear-gradient(160deg, rgba(16,20,28,0.96), rgba(10,12,18,0.98));
+  box-shadow: 0 16px 32px rgba(0, 0, 0, 0.45);
   margin-bottom: 14px;
   position: relative;
   overflow: hidden;
@@ -121,6 +177,20 @@ section[data-testid="stSidebar"] {
   height: 3px;
   width: 100%;
   background: linear-gradient(90deg, var(--accent), #ff9d2b 60%, #ffd02b);
+}
+.topbar:after {
+  content: "";
+  position: absolute;
+  right: 0;
+  top: 0;
+  width: 140px;
+  height: 100%;
+  opacity: 0.12;
+  background: repeating-linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.15) 0 12px,
+    rgba(0, 0, 0, 0.0) 12px 24px
+  );
 }
 .topbar-left, .topbar-center, .topbar-right {
   display: flex;
@@ -136,17 +206,19 @@ section[data-testid="stSidebar"] {
   border-radius: 10px;
   background: var(--accent);
   color: #fff;
-  font-family: "Teko", "Rajdhani", sans-serif;
+  font-family: "Oxanium", "Rajdhani", sans-serif;
   font-size: 1.1rem;
   font-weight: 700;
   letter-spacing: 0.04em;
 }
 .top-title {
-  font-family: "Teko", "Rajdhani", sans-serif;
-  font-size: 1.4rem;
+  font-family: "Oxanium", "Rajdhani", sans-serif;
+  font-size: 1.5rem;
   font-weight: 700;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
+  color: #f8fbff;
+  text-shadow: 0 0 16px rgba(225,6,0,0.25);
 }
 .top-sub {
   color: var(--muted);
@@ -160,8 +232,8 @@ section[data-testid="stSidebar"] {
   gap: 6px;
   padding: 6px 12px;
   border-radius: 999px;
-  border: 1px solid #2b3342;
-  background: #0b0f16;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(255,255,255,0.04);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -172,12 +244,25 @@ section[data-testid="stSidebar"] {
   font-size: 0.85rem;
 }
 .card {
-  background: linear-gradient(160deg, var(--panel), var(--panel-2));
+  background: linear-gradient(160deg, rgba(16,20,28,0.96), rgba(10,12,18,0.98));
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: 18px;
   padding: 16px 18px;
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 14px 30px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(6px);
   animation: fadein 0.6s ease-out;
+  position: relative;
+  overflow: hidden;
+}
+.card:before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 4px;
+  height: 100%;
+  background: linear-gradient(180deg, rgba(255, 43, 43, 0.8), rgba(255, 43, 43, 0.0));
+  opacity: 0.35;
 }
 .card-title {
   font-size: 0.95rem;
@@ -187,35 +272,107 @@ section[data-testid="stSidebar"] {
   text-transform: uppercase;
 }
 .card-value {
-  font-family: "Teko", "Rajdhani", sans-serif;
-  font-size: 2.1rem;
+  font-family: "Oxanium", "Rajdhani", sans-serif;
+  font-size: 2.2rem;
   font-weight: 700;
   margin-bottom: 2px;
   letter-spacing: 0.02em;
 }
-.card-sub {
-  font-size: 0.85rem;
-  color: var(--muted);
-}
+  .card-sub {
+    font-size: 0.85rem;
+    color: var(--muted);
+    line-height: 1.35;
+  }
+  .hero {
+    background: linear-gradient(120deg, rgba(255,255,255,0.04), rgba(255,255,255,0.01));
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 20px;
+    padding: 18px 22px;
+    margin-bottom: 18px;
+    box-shadow: 0 16px 34px rgba(0,0,0,0.45);
+    position: relative;
+    overflow: hidden;
+  }
+  .hero:after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(220px 120px at 86% -20%, rgba(255, 157, 43, 0.15), transparent 60%);
+    pointer-events: none;
+  }
+  .hero-title {
+    font-family: "Oxanium", "Rajdhani", sans-serif;
+    font-size: 2rem;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+  }
+  .hero-tagline {
+    margin-top: 6px;
+    color: #ff6b6b;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+  }
+  .hero-sub {
+    margin-top: 8px;
+    color: var(--muted);
+    font-size: 0.9rem;
+  }
+  .summary-row {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+    margin-top: 8px;
+  }
+  .summary-item {
+    background: rgba(15, 20, 32, 0.6);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 12px;
+    padding: 10px 12px;
+    text-align: center;
+  }
+  .summary-item span {
+    display: block;
+    font-size: 0.7rem;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  .summary-item strong {
+    font-family: "Oxanium", "Rajdhani", sans-serif;
+    font-size: 1.1rem;
+    color: #ffffff;
+  }
 .badge {
   display: inline-block;
   padding: 4px 10px;
   border-radius: 999px;
-  background: rgba(255, 43, 43, 0.15);
-  color: var(--accent);
+  background: rgba(255, 43, 43, 0.12);
+  color: #ff6b6b;
   font-weight: 600;
   font-size: 0.8rem;
-  border: 1px solid rgba(255, 43, 43, 0.35);
+  border: 1px solid rgba(255, 43, 43, 0.28);
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
 .section-title {
-  font-family: "Teko", "Rajdhani", sans-serif;
+  font-family: "Oxanium", "Rajdhani", sans-serif;
   font-size: 1.5rem;
   font-weight: 700;
   margin: 6px 0 12px 0;
   letter-spacing: 0.04em;
   text-transform: uppercase;
+  padding-bottom: 6px;
+  border-bottom: 2px solid rgba(255, 43, 43, 0.35);
+}
+.section-title::after {
+  content: "";
+  display: block;
+  height: 3px;
+  width: 90px;
+  margin-top: 6px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), var(--accent2));
 }
 .callout {
   background: linear-gradient(160deg, rgba(255,43,43,0.08), rgba(18,22,31,0.9));
@@ -224,6 +381,7 @@ section[data-testid="stSidebar"] {
   padding: 12px 14px;
   color: #e9edf5;
   font-size: 0.95rem;
+  backdrop-filter: blur(6px);
 }
 .callout strong {
   color: var(--accent);
@@ -235,6 +393,7 @@ section[data-testid="stSidebar"] {
   padding: 12px 14px;
   color: #e9edf5;
   font-size: 0.95rem;
+  backdrop-filter: blur(6px);
 }
 .example-card strong {
   color: var(--accent2);
@@ -246,6 +405,29 @@ section[data-testid="stSidebar"] {
   padding: 12px 14px;
   color: #e9edf5;
   font-size: 0.95rem;
+  backdrop-filter: blur(6px);
+}
+.policy-card {
+  background: linear-gradient(160deg, rgba(23,195,255,0.08), rgba(18,22,31,0.92));
+  border: 1px solid rgba(23,195,255,0.28);
+  border-radius: 14px;
+  padding: 12px 14px;
+  color: #e9edf5;
+  font-size: 0.9rem;
+  box-shadow: 0 12px 24px rgba(0,0,0,0.35);
+  backdrop-filter: blur(6px);
+}
+.policy-title {
+  font-family: "Oxanium", "Rajdhani", sans-serif;
+  font-size: 0.95rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 6px;
+}
+.policy-item {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin-bottom: 4px;
 }
 .decision-pill {
   display: inline-block;
@@ -255,6 +437,24 @@ section[data-testid="stSidebar"] {
   font-size: 0.85rem;
   text-transform: uppercase;
   letter-spacing: 0.04em;
+}
+.source-pill {
+  display: inline-block;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-weight: 700;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border: 1px solid rgba(255,255,255,0.16);
+}
+.source-model {
+  background: rgba(23,195,255,0.15);
+  color: #8de2ff;
+}
+.source-policy {
+  background: rgba(255,157,43,0.16);
+  color: #ffce85;
 }
 .decision-pit {
   background: rgba(255,43,43,0.18);
@@ -321,16 +521,16 @@ section[data-testid="stSidebar"] {
   margin-top: 4px;
 }
 .strategy-card {
-  background: linear-gradient(160deg, rgba(255,43,43,0.08), rgba(18,22,31,0.95));
-  border: 1px solid rgba(255,43,43,0.35);
-  border-radius: 14px;
+  background: linear-gradient(160deg, rgba(255,43,43,0.06), rgba(14,18,26,0.95));
+  border: 1px solid rgba(255,43,43,0.28);
+  border-radius: 18px;
   padding: 14px 16px;
   color: #e9edf5;
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 14px 30px rgba(0, 0, 0, 0.45);
 }
 .strategy-title {
-  font-family: "Teko", "Rajdhani", sans-serif;
-  font-size: 1.1rem;
+  font-family: "Oxanium", "Rajdhani", sans-serif;
+  font-size: 1.05rem;
   letter-spacing: 0.06em;
   text-transform: uppercase;
 }
@@ -340,12 +540,12 @@ section[data-testid="stSidebar"] {
   margin-top: 4px;
 }
 .track-card {
-  background: linear-gradient(160deg, rgba(40,193,214,0.08), rgba(18,22,31,0.95));
-  border: 1px solid rgba(40,193,214,0.35);
-  border-radius: 16px;
+  background: linear-gradient(160deg, rgba(23,195,255,0.08), rgba(14,18,26,0.95));
+  border: 1px solid rgba(23,195,255,0.32);
+  border-radius: 18px;
   padding: 14px 16px;
   color: #e9edf5;
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 14px 30px rgba(0, 0, 0, 0.45);
 }
 .track-header {
   display: flex;
@@ -355,8 +555,8 @@ section[data-testid="stSidebar"] {
   flex-wrap: wrap;
 }
 .track-title {
-  font-family: "Teko", "Rajdhani", sans-serif;
-  font-size: 1.1rem;
+  font-family: "Oxanium", "Rajdhani", sans-serif;
+  font-size: 1.05rem;
   letter-spacing: 0.06em;
   text-transform: uppercase;
 }
@@ -454,6 +654,31 @@ section[data-testid="stSidebar"] {
   color: #ff9d2b;
   font-weight: 700;
 }
+.legend-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 4px 0 10px 0;
+}
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid #2b3342;
+  background: #0b0f16;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+.legend-note {
+  color: var(--muted);
+  font-size: 0.72rem;
+  letter-spacing: 0.02em;
+  text-transform: none;
+}
 .tire-gauge {
   height: 8px;
   border-radius: 999px;
@@ -493,6 +718,402 @@ section[data-testid="stSidebar"] {
 .telemetry-item span {
   color: #e6ebf2;
   font-weight: 600;
+}
+.telemetry-panel {
+  background: linear-gradient(160deg, rgba(16,20,28,0.98), rgba(10,12,18,0.98));
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 18px;
+  padding: 14px 16px;
+  box-shadow: 0 14px 30px rgba(0, 0, 0, 0.45);
+  color: #e9edf5;
+  backdrop-filter: blur(6px);
+}
+.telemetry-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.telemetry-head-right {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+.telemetry-head-left {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.telemetry-main {
+  font-family: "Oxanium", "Rajdhani", sans-serif;
+  font-size: 0.88rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.telemetry-sub {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+.telemetry-call {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  border: 1px solid rgba(255,255,255,0.18);
+  background: rgba(255,255,255,0.04);
+}
+.telemetry-call.pit {
+  border-color: rgba(255,43,43,0.6);
+  color: #ff6b6b;
+}
+.telemetry-call.wait {
+  border-color: rgba(255,157,43,0.6);
+  color: #ffb25c;
+}
+.telemetry-call.stay {
+  border-color: rgba(23,195,255,0.6);
+  color: #7be7f3;
+}
+.telemetry-signal {
+  font-size: 0.72rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.telemetry-confidence {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 120px;
+}
+.telemetry-conf-label {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #cdd6e2;
+}
+.telemetry-conf-rail {
+  height: 6px;
+  border-radius: 999px;
+  background: #151c28;
+  border: 1px solid rgba(255,255,255,0.08);
+  overflow: hidden;
+}
+.telemetry-conf-fill {
+  height: 100%;
+  background: linear-gradient(90deg, rgba(23,195,255,0.7), rgba(255,157,43,0.85), rgba(225,6,0,0.95));
+}
+.telemetry-chip {
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(255,255,255,0.04);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.telemetry-chart {
+  background: #0c111a;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 14px;
+  padding: 8px 10px;
+}
+.telemetry-svg {
+  width: 100%;
+  height: 140px;
+  display: block;
+}
+.telemetry-delta-row {
+  display: grid;
+  grid-template-columns: repeat(13, minmax(0, 1fr));
+  gap: 4px;
+  margin-top: 6px;
+}
+.telemetry-delta-seg {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.08);
+}
+.telemetry-delta-seg.up {
+  background: linear-gradient(90deg, rgba(23,195,255,0.3), rgba(43,217,127,0.8));
+}
+.telemetry-delta-seg.down {
+  background: linear-gradient(90deg, rgba(255,157,43,0.4), rgba(225,6,0,0.85));
+}
+.telemetry-delta-seg.flat {
+  background: rgba(255,255,255,0.12);
+}
+.telemetry-delta-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.65rem;
+  color: var(--muted);
+  margin-top: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.telemetry-bars {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+.telemetry-bar {
+  display: grid;
+  grid-template-columns: 80px 1fr 52px;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.74rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.telemetry-rail {
+  height: 8px;
+  border-radius: 999px;
+  background: #151c28;
+  border: 1px solid rgba(255,255,255,0.08);
+  overflow: hidden;
+}
+.telemetry-fill {
+  height: 100%;
+}
+.telemetry-fill.throttle {
+  background: linear-gradient(90deg, rgba(23,195,255,0.7), rgba(43,217,127,0.9));
+}
+.telemetry-fill.brake {
+  background: linear-gradient(90deg, rgba(255,183,3,0.7), rgba(225,6,0,0.9));
+}
+.telemetry-fill.wear {
+  background: linear-gradient(90deg, rgba(255,183,3,0.5), rgba(225,6,0,0.8));
+}
+.telemetry-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.telemetry-tag {
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(255,255,255,0.04);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #cdd6e2;
+}
+.driver-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: linear-gradient(160deg, rgba(16,20,28,0.96), rgba(10,12,18,0.98));
+  position: relative;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+.driver-card:before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 4px;
+  height: 100%;
+  background: var(--team-color, #17c3ff);
+}
+.driver-badge {
+  width: 46px;
+  height: 46px;
+  border-radius: 12px;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.12);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: "Oxanium", "Rajdhani", sans-serif;
+  font-size: 1.05rem;
+  letter-spacing: 0.08em;
+  color: #f7fafc;
+}
+.driver-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.driver-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+.driver-name {
+  font-family: "Oxanium", "Rajdhani", sans-serif;
+  font-size: 0.9rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.driver-meta {
+  font-size: 0.74rem;
+  color: var(--muted);
+}
+.driver-tag {
+  margin-left: auto;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.18);
+  background: rgba(255,255,255,0.04);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #f1f5f9;
+}
+.driver-tag.pit {
+  border-color: rgba(255,43,43,0.6);
+  color: #ff6b6b;
+}
+.driver-tag.wait {
+  border-color: rgba(255,157,43,0.6);
+  color: #ffb25c;
+}
+.driver-tag.stay {
+  border-color: rgba(23,195,255,0.6);
+  color: #7be7f3;
+}
+.ladder-card {
+  background: linear-gradient(160deg, rgba(16,20,28,0.96), rgba(10,12,18,0.98));
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 16px;
+  padding: 12px 14px;
+  box-shadow: 0 12px 26px rgba(0, 0, 0, 0.4);
+  margin-top: 8px;
+}
+.ladder-title {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+.ladder-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.ladder-step {
+  padding: 8px 6px;
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,0.1);
+  background: rgba(255,255,255,0.03);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  text-align: center;
+  color: #cdd6e2;
+}
+.ladder-step.active.pit {
+  border-color: rgba(225,6,0,0.7);
+  color: #ff6b6b;
+  box-shadow: 0 0 12px rgba(225,6,0,0.25);
+}
+.ladder-step.active.wait {
+  border-color: rgba(255,157,43,0.7);
+  color: #ffb25c;
+  box-shadow: 0 0 12px rgba(255,157,43,0.25);
+}
+.ladder-step.active.stay {
+  border-color: rgba(23,195,255,0.7);
+  color: #7be7f3;
+  box-shadow: 0 0 12px rgba(23,195,255,0.25);
+}
+.reliability-ribbon {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(16,20,28,0.9);
+  margin: 10px 0 6px;
+  flex-wrap: wrap;
+}
+.reliability-pill {
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.14);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #cdd6e2;
+}
+.reliability-pill.high {
+  border-color: rgba(43,217,127,0.6);
+  color: #2bd97f;
+}
+.reliability-pill.med {
+  border-color: rgba(255,157,43,0.6);
+  color: #ffb25c;
+}
+.reliability-pill.low {
+  border-color: rgba(225,6,0,0.6);
+  color: #ff6b6b;
+}
+.audit-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.12);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 8px;
+}
+.audit-pass {
+  border-color: rgba(43,217,127,0.6);
+  color: #2bd97f;
+}
+.audit-fail {
+  border-color: rgba(225,6,0,0.6);
+  color: #ff6b6b;
+}
+.telemetry-split {
+  margin-top: 8px;
+}
+.telemetry-split-label {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+.telemetry-split-rail {
+  position: relative;
+  height: 6px;
+  border-radius: 999px;
+  background: #151c28;
+  border: 1px solid rgba(255,255,255,0.08);
+}
+.telemetry-split-marker {
+  position: absolute;
+  top: -4px;
+  width: 3px;
+  height: 14px;
+  background: #17c3ff;
+  box-shadow: 0 0 8px rgba(23,195,255,0.6);
+}
+.telemetry-split-meta {
+  font-size: 0.68rem;
+  color: #cdd6e2;
+  margin-top: 4px;
 }
 .helper-card {
   background: linear-gradient(160deg, rgba(40, 193, 214, 0.08), rgba(18, 22, 31, 0.9));
@@ -616,6 +1237,103 @@ section[data-testid="stSidebar"] {
 }
 .swatch-ref { background: #2c3545; }
 .swatch-my { background: #ff2b2b; }
+.mini-tower {
+  background: linear-gradient(160deg, rgba(16,20,28,0.96), rgba(10,12,18,0.98));
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 16px;
+  padding: 12px 14px;
+  box-shadow: 0 12px 26px rgba(0, 0, 0, 0.45);
+  margin-bottom: 12px;
+}
+.mini-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #cdd6e2;
+  margin-bottom: 8px;
+}
+.mini-head span {
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+.mini-rows {
+  display: grid;
+  gap: 6px;
+}
+.mini-row {
+  display: grid;
+  grid-template-columns: 34px 1fr 62px 62px;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 12px;
+  background: rgba(14,18,26,0.9);
+  border: 1px solid rgba(255,255,255,0.08);
+}
+.mini-row.best {
+  border-color: rgba(255,157,43,0.6);
+  box-shadow: 0 0 12px rgba(255,157,43,0.18);
+}
+.mini-stage {
+  font-family: "Oxanium", "Rajdhani", sans-serif;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+.mini-bar {
+  height: 8px;
+  border-radius: 999px;
+  background: #151c28;
+  border: 1px solid rgba(255,255,255,0.08);
+  overflow: hidden;
+}
+.mini-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #2c3545, #6e7888);
+}
+.mini-row.my .mini-fill {
+  background: linear-gradient(90deg, #ff9d2b, #ff2b2b);
+}
+.mini-val {
+  text-align: right;
+  font-weight: 700;
+  font-size: 0.78rem;
+}
+.mini-delta {
+  text-align: right;
+  font-weight: 700;
+  font-size: 0.74rem;
+}
+div[data-baseweb="tab-list"] {
+  gap: 8px;
+}
+button[data-baseweb="tab"] {
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 999px !important;
+  padding: 6px 14px;
+  font-family: "Oxanium", "Rajdhani", sans-serif;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #cdd6e2;
+}
+button[data-baseweb="tab"][aria-selected="true"] {
+  background: linear-gradient(90deg, rgba(225,6,0,0.25), rgba(15,19,27,0.95));
+  border-color: rgba(225,6,0,0.6);
+  color: #fff5f5;
+  box-shadow: 0 0 16px rgba(225,6,0,0.25);
+}
+div[data-baseweb="select"] > div,
+div[data-baseweb="input"] > div,
+div[data-baseweb="textarea"] > div {
+  background: rgba(255,255,255,0.04) !important;
+  border: 1px solid rgba(255,255,255,0.12) !important;
+  border-radius: 12px !important;
+  color: var(--ink);
+}
 @keyframes fadein {
   from { opacity: 0; transform: translateY(6px); }
   to { opacity: 1; transform: translateY(0); }
@@ -626,10 +1344,423 @@ section[data-testid="stSidebar"] {
     )
 
 
+def _broadcast_ticker_html(items: list[str]) -> str:
+    safe_items = [html.escape(item) for item in items if item]
+    payload = json.dumps(safe_items[:4])
+    return f"""
+<div class="rc-strip">
+  <div class="rc-title">Race Control</div>
+  <div class="rc-items" id="rc-items"></div>
+</div>
+<script>
+const rcItems = {payload};
+const rcRoot = document.getElementById("rc-items");
+rcItems.forEach((text, idx) => {{
+  const item = document.createElement("div");
+  item.className = "rc-item" + (idx === 0 ? " active" : "");
+  item.textContent = text;
+  rcRoot.appendChild(item);
+}});
+let idx = 0;
+setInterval(() => {{
+  const nodes = rcRoot.querySelectorAll(".rc-item");
+  if (!nodes.length) return;
+  nodes.forEach(n => n.classList.remove("active"));
+  nodes[idx % nodes.length].classList.add("active");
+  idx += 1;
+}}, 2400);
+</script>
+<style>
+  .rc-strip {{
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 999px;
+    background: linear-gradient(90deg, rgba(225,6,0,0.18), rgba(12,16,24,0.95));
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 12px;
+    margin: 6px 0 12px 0;
+    overflow: hidden;
+    font-family: "Rajdhani", sans-serif;
+  }}
+  .rc-title {{
+    font-family: "Oxanium", "Rajdhani", sans-serif;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: #ffd166;
+    font-weight: 700;
+    padding-right: 10px;
+    border-right: 1px solid rgba(255,255,255,0.15);
+  }}
+  .rc-items {{
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }}
+  .rc-item {{
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #cdd6e2;
+    padding: 4px 10px;
+    border-radius: 999px;
+    border: 1px solid rgba(255,255,255,0.12);
+    background: rgba(255,255,255,0.04);
+    transition: all 0.2s ease;
+  }}
+  .rc-item.active {{
+    border-color: rgba(255,157,43,0.8);
+    color: #fff5e6;
+    box-shadow: 0 0 12px rgba(255,157,43,0.35);
+  }}
+</style>
+"""
+
+
+def _timing_tower_html(
+    rows: list[dict],
+    metric_label: str,
+    dom_id: str = "tower-rows-main",
+    title: str = "Timing Tower",
+    show_legend: bool = True,
+) -> str:
+    safe_label = html.escape(metric_label)
+    safe_title = html.escape(title)
+    safe_id = html.escape(dom_id)
+    js_id = dom_id.replace("-", "_")
+    payload = json.dumps(rows)
+    legend_html = (
+        '<div class="tower-legend">'
+        '<span class="tower-dot ref"></span>RefTech'
+        '<span class="tower-dot my"></span>MyMethod'
+        "</div>"
+        if show_legend
+        else ""
+    )
+    return f"""
+<div class="tower-wrap">
+  <div class="tower-head">
+    <div class="tower-title">{safe_title}</div>
+    <div class="tower-sub">{safe_label}</div>
+  </div>
+  <div class="tower-rows" id="{safe_id}"></div>
+  {legend_html}
+</div>
+<script>
+const towerRows_{js_id} = {payload};
+const maxVal_{js_id} = Math.max(...towerRows_{js_id}.map(r => r.value || 0), 0.0001);
+const bestVal_{js_id} = Math.max(...towerRows_{js_id}.map(r => r.value || 0), 0);
+const root_{js_id} = document.getElementById("{safe_id}");
+if (root_{js_id}) {{
+  towerRows_{js_id}.forEach((row) => {{
+    const wrap = document.createElement("div");
+    const isBest = Math.abs((row.value || 0) - bestVal_{js_id}) < 1e-6;
+    wrap.className = "tower-row" + (row.method === "MyMethod" ? " is-my" : " is-ref") + (isBest ? " is-best" : "");
+    const stage = document.createElement("div");
+    stage.className = "tower-stage";
+    stage.textContent = row.stage;
+    const bar = document.createElement("div");
+    bar.className = "tower-bar";
+    const fill = document.createElement("div");
+    fill.className = "tower-fill";
+    fill.style.width = ((row.value || 0) / maxVal_{js_id} * 100).toFixed(1) + "%";
+    bar.appendChild(fill);
+    const val = document.createElement("div");
+    val.className = "tower-value";
+    val.textContent = (row.value ?? 0).toFixed(3);
+    const delta = document.createElement("div");
+    delta.className = "tower-delta";
+    if (row.delta === null || row.delta === undefined) {{
+      delta.textContent = "N/A";
+      delta.classList.add("delta-flat");
+    }} else {{
+      const d = row.delta;
+      delta.textContent = (d >= 0 ? "+" : "") + d.toFixed(3);
+      delta.classList.add(d > 0 ? "delta-up" : d < 0 ? "delta-down" : "delta-flat");
+    }}
+    wrap.appendChild(stage);
+    wrap.appendChild(bar);
+    wrap.appendChild(val);
+    wrap.appendChild(delta);
+    root_{js_id}.appendChild(wrap);
+  }});
+}}
+</script>
+<style>
+  .tower-wrap {{
+    font-family: "Rajdhani", sans-serif;
+    background: linear-gradient(180deg, rgba(16,20,28,0.95), rgba(10,12,18,0.98));
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 18px;
+    padding: 12px 16px 14px 16px;
+    color: #e9edf5;
+  }}
+  .tower-head {{
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 8px;
+  }}
+  .tower-title {{
+    font-family: "Oxanium", "Rajdhani", sans-serif;
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: #e6ebf2;
+  }}
+  .tower-sub {{
+    font-size: 0.7rem;
+    color: #a6adbb;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }}
+  .tower-rows {{
+    display: grid;
+    gap: 8px;
+  }}
+  .tower-row {{
+    display: grid;
+    grid-template-columns: 48px 1fr 70px 70px;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 8px;
+    border-radius: 12px;
+    background: rgba(14,18,26,0.92);
+    border: 1px solid rgba(255,255,255,0.08);
+  }}
+  .tower-row.is-best {{
+    border-color: rgba(255,157,43,0.7);
+    box-shadow: 0 0 12px rgba(255,157,43,0.2);
+  }}
+  .tower-stage {{
+    font-family: "Oxanium", "Rajdhani", sans-serif;
+    font-weight: 700;
+    color: #d9e0ea;
+    letter-spacing: 0.08em;
+  }}
+  .tower-bar {{
+    height: 8px;
+    border-radius: 999px;
+    background: #151c28;
+    border: 1px solid rgba(255,255,255,0.08);
+    overflow: hidden;
+  }}
+  .tower-fill {{
+    height: 100%;
+    background: linear-gradient(90deg, #2c3545, #6e7888);
+  }}
+  .tower-row.is-my .tower-fill {{
+    background: linear-gradient(90deg, #ff9d2b, #ff2b2b);
+  }}
+  .tower-value {{
+    text-align: right;
+    font-weight: 700;
+    font-size: 0.78rem;
+  }}
+  .tower-delta {{
+    text-align: right;
+    font-size: 0.75rem;
+    font-weight: 700;
+  }}
+  .tower-legend {{
+    margin-top: 8px;
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    font-size: 0.72rem;
+    color: #9aa4b3;
+  }}
+  .tower-dot {{
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+    margin-right: 6px;
+  }}
+  .tower-dot.ref {{ background: #6e7888; }}
+  .tower-dot.my {{ background: #ff2b2b; }}
+</style>
+"""
+
+
+def _mini_tower_html(rows: list[dict], metric_label: str) -> str:
+    if not rows:
+        return ""
+    best_val = max((r.get("value", 0.0) or 0.0) for r in rows)
+    max_val = max(best_val, 1e-6)
+    html_rows = []
+    for row in rows:
+        stage = html.escape(str(row.get("stage", "S?")))
+        val = float(row.get("value", 0.0) or 0.0)
+        width = min(max(val / max_val * 100.0, 0.0), 100.0)
+        method = row.get("method", "RefTech")
+        is_my = method == "MyMethod"
+        is_best = abs(val - best_val) < 1e-6
+        delta = row.get("delta")
+        if delta is None or not np.isfinite(delta):
+            delta_text = "-"
+            delta_class = "delta-flat"
+        else:
+            delta_text = f"{delta:+.3f}"
+            delta_class = "delta-up" if delta > 0 else "delta-down" if delta < 0 else "delta-flat"
+        row_class = "mini-row"
+        if is_my:
+            row_class += " my"
+        if is_best:
+            row_class += " best"
+        html_rows.append(
+            "<div class='{row_class}'>"
+            f"<div class='mini-stage'>{stage}</div>"
+            "<div class='mini-bar'>"
+            f"<div class='mini-fill' style='width:{width:.1f}%'></div>"
+            "</div>"
+            f"<div class='mini-val'>{val:.3f}</div>"
+            f"<div class='mini-delta {delta_class}'>{delta_text}</div>"
+            "</div>".format(row_class=row_class)
+        )
+    safe_label = html.escape(metric_label)
+    return (
+        "<div class='mini-tower'>"
+        "<div class='mini-head'>Mini timing tower <span>"
+        f"{safe_label}"
+        "</span></div>"
+        "<div class='mini-rows'>"
+        + "".join(html_rows)
+        + "</div></div>"
+    )
+
+
+def _pit_window_gauge_html(
+    title: str,
+    lap_min: int | None,
+    lap_max: int | None,
+    lap_now: int | None,
+    window_start: int | None,
+    window_end: int | None,
+    target_lap: int | None,
+) -> str:
+    def _pos(val: int | None) -> float:
+        if val is None or lap_min is None or lap_max is None or lap_max <= lap_min:
+            return 0.0
+        return float(max(0.0, min(1.0, (val - lap_min) / (lap_max - lap_min))))
+
+    now_pos = _pos(lap_now) * 100.0
+    win_start = _pos(window_start) * 100.0
+    win_end = _pos(window_end) * 100.0
+    target_pos = _pos(target_lap) * 100.0
+    if window_start is None or window_end is None:
+        win_start = 0.0
+        win_end = 0.0
+    safe_title = html.escape(title)
+    return f"""
+<div class="gauge-wrap">
+  <div class="gauge-title">{safe_title}</div>
+  <div class="gauge-track">
+    <div class="gauge-window" style="left:{win_start:.1f}%; width:{max(2.0, win_end - win_start):.1f}%;"></div>
+    <div class="gauge-tick in" style="left:{win_start:.1f}%;"><span>IN</span></div>
+    <div class="gauge-tick target" style="left:{target_pos:.1f}%;"><span>TARGET</span></div>
+    <div class="gauge-tick out" style="left:{win_end:.1f}%;"><span>OUT</span></div>
+    <div class="gauge-now" style="left:{now_pos:.1f}%;"><span>NOW</span></div>
+  </div>
+  <div class="gauge-labels"><span>L{lap_min if lap_min is not None else 'N/A'}</span><span>L{lap_max if lap_max is not None else 'N/A'}</span></div>
+</div>
+<style>
+  .gauge-wrap {{
+    font-family: "Rajdhani", sans-serif;
+    background: rgba(14,18,26,0.92);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 16px;
+    padding: 10px 12px;
+    color: #e9edf5;
+  }}
+  .gauge-title {{
+    font-family: "Oxanium", "Rajdhani", sans-serif;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #a6adbb;
+    margin-bottom: 6px;
+  }}
+  .gauge-track {{
+    position: relative;
+    height: 10px;
+    border-radius: 999px;
+    background: #151c28;
+    border: 1px solid rgba(255,255,255,0.08);
+    overflow: hidden;
+  }}
+  .gauge-window {{
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    background: linear-gradient(90deg, rgba(255,157,43,0.25), rgba(255,157,43,0.95));
+  }}
+  .gauge-now {{
+    position: absolute;
+    top: -8px;
+    width: 3px;
+    height: 24px;
+    background: #28c1d6;
+    box-shadow: 0 0 10px rgba(40,193,214,0.7);
+  }}
+  .gauge-now span {{
+    position: absolute;
+    top: -14px;
+    left: -10px;
+    font-size: 0.6rem;
+    color: #7be7f3;
+    letter-spacing: 0.08em;
+  }}
+  .gauge-tick {{
+    position: absolute;
+    top: -6px;
+    width: 2px;
+    height: 20px;
+    background: rgba(255,255,255,0.4);
+  }}
+  .gauge-tick span {{
+    position: absolute;
+    top: -14px;
+    left: -10px;
+    font-size: 0.6rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #cdd6e2;
+  }}
+  .gauge-tick.in {{
+    background: rgba(255,157,43,0.8);
+  }}
+  .gauge-tick.in span {{
+    color: #ffb25c;
+  }}
+  .gauge-tick.out {{
+    background: rgba(225,6,0,0.8);
+  }}
+  .gauge-tick.out span {{
+    color: #ff6b6b;
+  }}
+  .gauge-tick.target {{
+    background: rgba(23,195,255,0.8);
+  }}
+  .gauge-tick.target span {{
+    color: #7be7f3;
+  }}
+  .gauge-labels {{
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.68rem;
+    color: #a6adbb;
+    margin-top: 4px;
+  }}
+</style>
+"""
+
+
 @st.cache_data
 def _load_summary(path: Path, mtime: float) -> pd.DataFrame:
     df = pd.read_csv(path)
-    stage_match = df["stage"].astype(str).str.extract(r"Stage\\s+(\\d+)")
+    stage_match = df["stage"].astype(str).str.extract(r"Stage\s+(\d+)")
     df["stage_id"] = pd.to_numeric(stage_match[0], errors="coerce")
     if df["stage_id"].isna().any():
         fallback = pd.Series(np.arange(1, len(df) + 1), index=df.index)
@@ -644,7 +1775,7 @@ def _load_summary(path: Path, mtime: float) -> pd.DataFrame:
 @st.cache_data
 def _load_folds(path: Path, mtime: float) -> pd.DataFrame:
     df = pd.read_csv(path)
-    stage_match = df["stage"].astype(str).str.extract(r"Stage\\s+(\\d+)")
+    stage_match = df["stage"].astype(str).str.extract(r"Stage\s+(\d+)")
     df["stage_id"] = pd.to_numeric(stage_match[0], errors="coerce")
     if df["stage_id"].isna().any():
         fallback = pd.Series(np.arange(1, len(df) + 1), index=df.index)
@@ -954,6 +2085,396 @@ def _telemetry_sections(row: pd.Series, payload: dict) -> str:
     return "".join([s for s in sections if s])
 
 
+def _gap_percentile(df_context: pd.DataFrame, row: pd.Series) -> float | None:
+    gap_col = _pick_column(
+        df_context,
+        [
+            "gap_to_leader_prev",
+            "gap_to_leader",
+            "gap",
+            "gap_to_front_prev",
+            "interval",
+        ],
+    )
+    if not gap_col or gap_col not in df_context.columns or gap_col not in row:
+        return None
+    vals = pd.to_numeric(df_context[gap_col], errors="coerce").dropna()
+    if vals.empty:
+        return None
+    try:
+        target = float(row[gap_col])
+    except Exception:
+        return None
+    if not np.isfinite(target):
+        return None
+    rank = float((vals <= target).mean())
+    return float((1.0 - rank) * 100.0)
+
+
+def _threshold_for_precision(
+    y_true: np.ndarray, probs: np.ndarray, target_precision: float = 0.6
+) -> float | None:
+    if y_true.size == 0 or probs.size == 0:
+        return None
+    order = np.argsort(probs)[::-1]
+    y_sorted = y_true[order]
+    p_sorted = probs[order]
+    tp = 0
+    fp = 0
+    best = None
+    for i in range(len(p_sorted)):
+        if y_sorted[i] == 1:
+            tp += 1
+        else:
+            fp += 1
+        prec = tp / max(1, tp + fp)
+        if prec >= target_precision:
+            best = float(p_sorted[i])
+            break
+    return best
+
+
+def _apply_confirm(
+    df_context: pd.DataFrame,
+    proba_col: str,
+    lap_col: str | None,
+    threshold: float,
+    confirm_laps: int = 2,
+) -> pd.Series:
+    if lap_col is None or lap_col not in df_context.columns:
+        return pd.Series([False] * len(df_context), index=df_context.index)
+    df_sorted = df_context.copy()
+    df_sorted[lap_col] = pd.to_numeric(df_sorted[lap_col], errors="coerce")
+    df_sorted = df_sorted.dropna(subset=[lap_col]).sort_values(lap_col)
+    hits = (df_sorted[proba_col] >= threshold).astype(int).rolling(confirm_laps).sum() >= confirm_laps
+    out = pd.Series(False, index=df_context.index)
+    out.loc[df_sorted.index] = hits.fillna(False)
+    return out
+
+
+def _smooth_prob_by_lap(
+    df_context: pd.DataFrame,
+    lap_col: str | None,
+    proba_col: str,
+    lap_value: int | None,
+    window: int = 3,
+) -> float | None:
+    if lap_col is None or lap_col not in df_context.columns or proba_col not in df_context.columns:
+        return None
+    df_laps = df_context[[lap_col, proba_col]].copy()
+    df_laps[lap_col] = pd.to_numeric(df_laps[lap_col], errors="coerce")
+    df_laps = df_laps.dropna(subset=[lap_col, proba_col])
+    if df_laps.empty:
+        return None
+    df_laps = df_laps.groupby(lap_col, as_index=False)[proba_col].mean().sort_values(lap_col)
+    df_laps["p_smooth"] = (
+        df_laps[proba_col].rolling(window=window, min_periods=1, center=True).mean()
+    )
+    if lap_value is not None:
+        match = df_laps.loc[df_laps[lap_col] == lap_value, "p_smooth"]
+        if not match.empty:
+            return float(match.iloc[-1])
+    return float(df_laps["p_smooth"].iloc[-1])
+
+
+def _leakage_audit(df: pd.DataFrame) -> list[str]:
+    risk_fields = {
+        "lapno",
+        "pitstops_so_far",
+        "position",
+        "race_progress",
+        "tireage",
+        "stint_laps",
+        "gap",
+        "interval",
+    }
+    flagged = []
+    for col in df.columns:
+        lower = col.lower()
+        if lower in risk_fields and not lower.endswith("_prev"):
+            flagged.append(col)
+    return sorted(flagged)
+
+
+def _telemetry_panel_html(
+    panel_label: str,
+    driver: str,
+    lap_text: str,
+    circuit: str,
+    weather: str,
+    row: pd.Series,
+    payload: dict,
+    lap_value: int | None,
+    proba: float | None,
+    proba_raw: float | None,
+    threshold: float | None,
+    fold_std: float | None,
+    gap_percentile: float | None,
+) -> str:
+    def _num(val: float | str | None, default: float) -> float:
+        if val is None:
+            return default
+        try:
+            out = float(val)
+            if not np.isfinite(out):
+                return default
+            return out
+        except Exception:
+            return default
+
+    pace = _first_valid(row, ["relative_pace_prev", "relative_pace"])
+    pace = _num(pace, 1.0)
+    pace = float(np.clip(pace, 0.75, 1.25))
+    base_speed = 320.0 / pace
+    base_speed = float(np.clip(base_speed, 260.0, 340.0))
+
+    wear_pct = payload.get("tire_wear_pct")
+    wear_ratio = _num(wear_pct, 40.0)
+    wear_ratio = wear_ratio / 100.0 if wear_ratio > 1.5 else wear_ratio
+    wear_ratio = float(np.clip(wear_ratio, 0.05, 0.95))
+
+    volatility = 18.0 + wear_ratio * 12.0
+    phase = (lap_value or 0) * 0.35
+    xs = np.linspace(0, 2 * np.pi, 14)
+    series = (
+        base_speed
+        + volatility * np.sin(xs + phase)
+        + volatility * 0.35 * np.sin(xs * 1.8 + phase * 0.5)
+    )
+    series = np.clip(series, 180.0, 360.0)
+    min_s = float(np.min(series))
+    max_s = float(np.max(series))
+    if max_s - min_s < 1.0:
+        max_s = min_s + 1.0
+
+    width = 320.0
+    height = 100.0
+    points = []
+    for idx, val in enumerate(series):
+        x = idx / (len(series) - 1) * width
+        y = height - (float(val) - min_s) / (max_s - min_s) * height
+        points.append((x, y))
+    path = "M " + " L ".join(f"{x:.1f} {y:.1f}" for x, y in points)
+    area = f"{path} L {width:.1f} {height:.1f} L 0 {height:.1f} Z"
+
+    deltas = np.diff(series)
+    max_delta = float(np.max(np.abs(deltas))) if deltas.size else 0.0
+    if max_delta <= 0.0:
+        max_delta = 1.0
+    delta_segments = []
+    for d in deltas:
+        cls = "flat"
+        if d > 0.5:
+            cls = "up"
+        elif d < -0.5:
+            cls = "down"
+        opacity = 0.35 + 0.65 * min(abs(d) / max_delta, 1.0)
+        delta_segments.append(
+            f"<div class='telemetry-delta-seg {cls}' title='{d:+.1f} km/h' "
+            f"style='opacity:{opacity:.2f};'></div>"
+        )
+    delta_html = "".join(delta_segments)
+
+    sc_active = _num(_first_valid(row, ["sc_active_prev", "sc_active"]), 0.0) > 0
+    throttle = 92.0 - wear_ratio * 30.0 - (12.0 if sc_active else 0.0)
+    brake = 8.0 + wear_ratio * 28.0 + (12.0 if sc_active else 0.0)
+    throttle = float(np.clip(throttle, 5.0, 100.0))
+    brake = float(np.clip(brake, 5.0, 100.0))
+    wear_display = float(np.clip(wear_ratio * 100.0, 0.0, 100.0))
+
+    delta_val = _first_valid(row, ["delta_interval_prev", "delta_interval"])
+    delta_text = _format_seconds(_num(delta_val, np.nan))
+    if delta_text != "N/A":
+        delta_text = f"{delta_text}"
+
+    decision = str(payload.get("decision", "STAY OUT")).upper()
+    if "BOX" in decision:
+        call_class = "pit"
+    elif "STANDBY" in decision:
+        call_class = "wait"
+    else:
+        call_class = "stay"
+
+    gap = None
+    if proba is not None and threshold is not None and np.isfinite(proba) and np.isfinite(threshold):
+        gap = abs(float(proba) - float(threshold))
+    conf_pct = 0.0 if gap is None else min(gap / 0.25, 1.0) * 100.0
+    std_text = f"STD {fold_std:.2f}" if fold_std is not None and np.isfinite(fold_std) else "STD N/A"
+    conf_label = "CONF N/A" if gap is None else f"|P-T| {gap:.2f}"
+    conf_label = f"{conf_label} | {std_text}"
+
+    signal_text = "Signal N/A"
+    if proba is not None and np.isfinite(proba):
+        if proba_raw is not None and np.isfinite(proba_raw):
+            signal_text = f"Signal RAW {proba_raw:.2f} | SMOOTH {proba:.2f}"
+        else:
+            signal_text = f"Signal {proba:.2f}"
+
+    subtitle = f"{driver} | {lap_text} | {circuit} | {weather}"
+    safe_title = html.escape(panel_label)
+    safe_sub = html.escape(subtitle)
+    safe_decision = html.escape(decision)
+    safe_conf = html.escape(conf_label)
+    safe_signal = html.escape(signal_text)
+    speed_text = f"{base_speed:.0f} km/h"
+    speed_tag = html.escape(speed_text)
+    delta_tag = html.escape(delta_text)
+    wear_tag = f"{wear_display:.0f}% wear"
+    gap_pct = None
+    if gap_percentile is not None and np.isfinite(gap_percentile):
+        gap_pct = float(np.clip(gap_percentile, 0.0, 100.0))
+
+    return f"""
+<div class="telemetry-panel">
+  <div class="telemetry-head">
+    <div class="telemetry-head-left">
+      <div class="telemetry-main">{safe_title}</div>
+      <div class="telemetry-sub">{safe_sub}</div>
+    </div>
+    <div class="telemetry-head-right">
+      <div class="telemetry-call {call_class}">{safe_decision}</div>
+      <div class="telemetry-confidence">
+        <div class="telemetry-conf-label">{safe_conf}</div>
+        <div class="telemetry-conf-rail">
+          <div class="telemetry-conf-fill" style="width:{conf_pct:.1f}%;"></div>
+        </div>
+      </div>
+      <div class="telemetry-signal">{safe_signal}</div>
+    </div>
+  </div>
+  <div class="telemetry-chart">
+    <svg viewBox="0 0 320 110" class="telemetry-svg" preserveAspectRatio="none">
+      <defs>
+        <linearGradient id="telemetryLine" x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0%" stop-color="#17c3ff"/>
+          <stop offset="55%" stop-color="#ff9d2b"/>
+          <stop offset="100%" stop-color="#e10600"/>
+        </linearGradient>
+        <linearGradient id="telemetryFill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="rgba(23,195,255,0.25)"/>
+          <stop offset="100%" stop-color="rgba(11,13,18,0.0)"/>
+        </linearGradient>
+      </defs>
+      <path d="{area}" fill="url(#telemetryFill)"></path>
+      <path d="{path}" stroke="url(#telemetryLine)" stroke-width="2.2" fill="none"></path>
+    </svg>
+  </div>
+  <div class="telemetry-delta-row">
+    {delta_html}
+  </div>
+  <div class="telemetry-delta-labels">
+    <span>Delta band</span>
+    <span>+/-{max_delta:.1f} km/h</span>
+  </div>
+  <div class="telemetry-bars">
+    <div class="telemetry-bar">
+      <span>Throttle</span>
+      <div class="telemetry-rail"><div class="telemetry-fill throttle" style="width:{throttle:.1f}%;"></div></div>
+      <strong>{throttle:.0f}%</strong>
+    </div>
+    <div class="telemetry-bar">
+      <span>Brake</span>
+      <div class="telemetry-rail"><div class="telemetry-fill brake" style="width:{brake:.1f}%;"></div></div>
+      <strong>{brake:.0f}%</strong>
+    </div>
+    <div class="telemetry-bar">
+      <span>Tyre</span>
+      <div class="telemetry-rail"><div class="telemetry-fill wear" style="width:{wear_display:.1f}%;"></div></div>
+      <strong>{wear_display:.0f}%</strong>
+    </div>
+  </div>
+  <div class="telemetry-split">
+    <div class="telemetry-split-label">Gap percentile</div>
+  <div class="telemetry-split-rail">
+      <div class="telemetry-split-marker" style="left:{(0 if gap_pct is None else gap_pct):.1f}%;"></div>
+  </div>
+    <div class="telemetry-split-meta">{'N/A' if gap_pct is None else f'{gap_pct:.0f}% closer than field'}</div>
+  </div>
+  <div class="telemetry-foot">
+    <span class="telemetry-chip">Speed trap {speed_tag}</span>
+    <span class="telemetry-tag">Delta {delta_tag}</span>
+    <span class="telemetry-tag">Wear {wear_tag}</span>
+  </div>
+</div>
+"""
+
+
+def _driver_team_info(driver_code: str) -> tuple[str, str]:
+    mapping = {
+        "VER": ("Red Bull", "#1e5bc6"),
+        "PER": ("Red Bull", "#1e5bc6"),
+        "LEC": ("Ferrari", "#dc0000"),
+        "SAI": ("Ferrari", "#dc0000"),
+        "HAM": ("Mercedes", "#00d2be"),
+        "RUS": ("Mercedes", "#00d2be"),
+        "NOR": ("McLaren", "#ff8700"),
+        "PIA": ("McLaren", "#ff8700"),
+        "ALO": ("Aston Martin", "#006f62"),
+        "STR": ("Aston Martin", "#006f62"),
+        "GAS": ("Alpine", "#0090ff"),
+        "OCO": ("Alpine", "#0090ff"),
+        "ALB": ("Williams", "#005aff"),
+        "SAR": ("Williams", "#005aff"),
+        "TSU": ("RB", "#2b4562"),
+        "RIC": ("RB", "#2b4562"),
+        "BOT": ("Kick Sauber", "#00e701"),
+        "ZHO": ("Kick Sauber", "#00e701"),
+        "HUL": ("Haas", "#b6babd"),
+        "MAG": ("Haas", "#b6babd"),
+    }
+    code = driver_code.upper()
+    return mapping.get(code, ("Independent", "#6e7888"))
+
+
+def _driver_card_html(
+    label: str,
+    driver: str,
+    lap_text: str,
+    circuit: str,
+    weather: str,
+    decision: str,
+) -> str:
+    code = (driver or "DRV").upper()[:3]
+    team_name, team_color = _driver_team_info(code)
+    decision_text = (decision or "STAY OUT").upper()
+    if "BOX" in decision_text:
+        tag_class = "pit"
+    elif "STANDBY" in decision_text:
+        tag_class = "wait"
+    else:
+        tag_class = "stay"
+    meta = f"{lap_text} | {circuit} | {weather}"
+    return (
+        f"<div class='driver-card' style='--team-color:{team_color};'>"
+        f"<div class='driver-badge'>{html.escape(code)}</div>"
+        "<div class='driver-info'>"
+        f"<div class='driver-label'>{html.escape(label)}</div>"
+        f"<div class='driver-name'>{html.escape(driver)}</div>"
+        f"<div class='driver-meta'>{html.escape(team_name)} | {html.escape(meta)}</div>"
+        "</div>"
+        f"<div class='driver-tag {tag_class}'>{html.escape(decision_text)}</div>"
+        "</div>"
+    )
+
+
+def _decision_ladder_html(label: str, decision: str) -> str:
+    steps = [("STAY OUT", "stay"), ("STANDBY", "wait"), ("BOX BOX", "pit")]
+    decision = (decision or "STAY OUT").upper()
+    items = []
+    for name, cls in steps:
+        active = "active" if name in decision else ""
+        items.append(
+            f"<div class='ladder-step {active} {cls}'>{html.escape(name)}</div>"
+        )
+    return (
+        "<div class='ladder-card'>"
+        f"<div class='ladder-title'>{html.escape(label)}</div>"
+        "<div class='ladder-steps'>"
+        + "".join(items)
+        + "</div></div>"
+    )
+
+
 def _pit_window_series(df: pd.DataFrame) -> pd.Series:
     for cand in ("in_pit_window_prev", "in_pit_window", "pit_window_prev", "pit_window"):
         if cand in df.columns:
@@ -1070,6 +2591,9 @@ def _strategy_impact(
             lap_col,
             tire_max,
             lookahead_laps,
+            decision_margin=0.05,
+            window_start=None,
+            window_end=None,
         )
         return float(payload["net_gain_sec"])
 
@@ -1262,18 +2786,107 @@ def _decision_strength(prob: float, threshold: float) -> tuple[str, float]:
     return "Weak", gap
 
 
-def _reliability_label(rows: int) -> str:
-    if rows >= 5000:
+def _reliability_label(rows: int, groups: int | None, pos_rate: float | None) -> str:
+    score = 0
+    if rows >= 800:
+        score += 2
+    elif rows >= 300:
+        score += 1
+    if groups is not None:
+        if groups >= 10:
+            score += 2
+        elif groups >= 4:
+            score += 1
+    if pos_rate is not None and pos_rate >= 0.02:
+        score += 1
+    if score >= 4:
         return "High"
-    if rows >= 1500:
+    if score >= 2:
         return "Medium"
     return "Low"
+
+
+def _scenario_key_cols(circuit_col: str | None) -> list[str]:
+    cols = ["Driver", "weather_label"]
+    if circuit_col:
+        cols.insert(1, circuit_col)
+    return cols
+
+
+def _pick_default_scenario(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    circuit_col: str | None,
+) -> dict[str, str] | None:
+    key_cols = _scenario_key_cols(circuit_col)
+    for col in key_cols:
+        if col not in train_df.columns or col not in test_df.columns:
+            return None
+    train_keys = train_df[key_cols].dropna()
+    test_keys = test_df[key_cols].dropna()
+    if train_keys.empty or test_keys.empty:
+        return None
+    common = train_keys.drop_duplicates().merge(
+        test_keys.drop_duplicates(), on=key_cols, how="inner"
+    )
+    if common.empty:
+        return None
+    counts = train_keys.value_counts().reset_index(name="count")
+    common = common.merge(counts, on=key_cols, how="left").sort_values(
+        "count", ascending=False
+    )
+    row = common.iloc[0]
+    return {col: str(row[col]) for col in key_cols}
+
+
+def _find_monaco_double_stack(df: pd.DataFrame, lap_col: str | None) -> list[pd.Series]:
+    if df.empty or "race_id" not in df.columns or "Driver" not in df.columns:
+        return []
+    monaco = df[df["race_id"].astype(str) == "2022_Monaco"].copy()
+    if monaco.empty:
+        return []
+    drivers = ["LEC", "SAI"]
+    rows: list[pd.Series] = []
+    target_lap = 21
+    for drv in drivers:
+        subset = monaco[monaco["Driver"].astype(str) == drv]
+        if subset.empty:
+            continue
+        prefer = subset[subset["decide_pitstop"] == 1]
+        pick = prefer if not prefer.empty else subset
+        if lap_col and lap_col in pick.columns:
+            laps = pd.to_numeric(pick[lap_col], errors="coerce").fillna(target_lap)
+            idx = (laps - target_lap).abs().idxmin()
+            rows.append(pick.loc[idx])
+        else:
+            rows.append(pick.iloc[0])
+    return rows
+
+
+def _apply_scenario_filters(
+    df: pd.DataFrame,
+    driver: str | None,
+    circuit_col: str | None,
+    circuit_sel: str | None,
+    weather_sel: str | None,
+) -> pd.DataFrame:
+    out = df
+    if driver is not None:
+        out = out[out["Driver"] == driver]
+    if circuit_col and circuit_sel:
+        out = out[out[circuit_col].astype(str) == circuit_sel]
+    if weather_sel:
+        out = out[out["weather_label"] == weather_sel]
+    return out
 
 
 def _reason_phrase(reason_text: str) -> str:
     mapping = {
         "WINDOW": "window open",
         "WEAR": "high tyre wear",
+        "WEAR-URGENT": "critical tyre wear",
+        "WEAR-CRIT": "extreme tyre wear",
+        "WINDOW-SOON": "pit window soon",
         "SC": "safety car",
         "VSC": "virtual safety car",
         "LATE": "late race",
@@ -1281,6 +2894,10 @@ def _reason_phrase(reason_text: str) -> str:
         "COST-": "costly stop",
         "COST+": "time gain",
         "COST-HOLD": "cost warning",
+        "COOLDOWN": "new tyres cooldown",
+        "CONFIRM": "confirm 2 laps",
+        "CAP": "alert cap",
+        "LOCK": "policy lock",
         "CORE": "core signals",
     }
     reasons = []
@@ -1298,13 +2915,12 @@ def _decision_sentence(payload: dict, prob: float, threshold: float) -> str:
     window = str(payload.get("pit_window_text", "N/A"))
     decision = str(payload.get("decision", "STAY OUT"))
     reasons = _reason_phrase(str(payload.get("reason_text", "")))
-    if window == "OPEN":
-        if prob >= threshold:
-            return f"Window open and confidence above threshold: BOX (signals: {reasons})."
-        return f"Window open but confidence below threshold: STANDBY (signals: {reasons})."
-    if prob >= threshold:
-        return f"Window closed, so stay out for now (signals: {reasons})."
-    return f"Window closed and confidence low: STAY OUT (signals: {reasons})."
+    window_text = window.lower() if window != "N/A" else "unknown"
+    if decision.startswith("BOX"):
+        return f"Window {window_text} with strong signal: BOX (signals: {reasons})."
+    if decision.startswith("STANDBY"):
+        return f"Window {window_text} with mixed signal: STANDBY (signals: {reasons})."
+    return f"Window {window_text} and signal low: STAY OUT (signals: {reasons})."
 
 
 def _key_takeaways(summary: pd.DataFrame, metric_col: str) -> str:
@@ -1365,6 +2981,51 @@ def _decision_example(summary: pd.DataFrame) -> str:
     )
 
 
+def _policy_summary_html(
+    decision_threshold: float,
+    target_precision: float,
+    precision_guard: float,
+    alert_cap: float,
+    smooth_window: int,
+    confirm_laps: int,
+) -> str:
+    alert_pct = int(round(alert_cap * 100))
+    return (
+        "<div class='policy-card'>"
+        "<div class='policy-title'>Decision Policy (Demo)</div>"
+        f"<div class='policy-item'>Signal: calibrated probability, smoothed over {smooth_window} laps.</div>"
+        f"<div class='policy-item'>Threshold: {decision_threshold:.2f} "
+        f"(precision target {target_precision:.2f}, guard +{precision_guard:.2f}).</div>"
+        f"<div class='policy-item'>Stability: confirm {confirm_laps} laps, alert cap top {alert_pct}%.</div>"
+        "<div class='policy-item'>Overrides: pit window, tyre wear, SC/VSC, cooldown.</div>"
+        "</div>"
+    )
+
+
+def _holdout_tower_data(
+    holdout: pd.DataFrame | None,
+) -> tuple[list[dict] | None, str, str]:
+    if holdout is None or holdout.empty:
+        return None, "", "Holdout 70/30 (Stage 3/4): summary not available."
+    if "stage_id" not in holdout.columns and "stage" in holdout.columns:
+        stage_match = holdout["stage"].astype(str).str.extract(r"Stage\s+(\d+)")
+        holdout = holdout.copy()
+        holdout["stage_id"] = pd.to_numeric(stage_match[0], errors="coerce").fillna(0).astype(int)
+    s3 = holdout.loc[holdout["stage_id"] == 3]
+    s4 = holdout.loc[holdout["stage_id"] == 4]
+    if s3.empty or s4.empty:
+        return None, "", "Holdout 70/30 (Stage 3/4): missing Stage 3 or Stage 4 rows."
+    f1_s3 = float(s3["mean_f1"].iloc[0])
+    f1_s4 = float(s4["mean_f1"].iloc[0])
+    delta = f1_s4 - f1_s3
+    rows = [
+        {"stage": "S3", "value": f1_s3, "method": "RefTech", "delta": None},
+        {"stage": "S4", "value": f1_s4, "method": "MyMethod", "delta": delta},
+    ]
+    note = "Group holdout by race (train/test = 70/30)."
+    return rows, note, ""
+
+
 def _render_track_demo(
     panel_label: str,
     driver: str,
@@ -1372,6 +3033,7 @@ def _render_track_demo(
     circuit_text: str,
     weather_text: str,
     decision: str,
+    decision_source: str | None,
     proba: float,
     threshold: float,
     race_progress: float | None,
@@ -1416,6 +3078,10 @@ def _render_track_demo(
         decision_pill = "decision-wait"
     else:
         decision_pill = "decision-stay"
+    source_text = (decision_source or "MODEL").upper()
+    if source_text not in ("MODEL", "POLICY"):
+        source_text = "MODEL"
+    source_class = "source-model" if source_text == "MODEL" else "source-policy"
     pit_open = pit_window_text.upper() == "OPEN"
     pit_fill = "#ff9d2b" if pit_open else "#10151d"
     pit_stroke = "#ff9d2b" if pit_open else "#2a3342"
@@ -1513,6 +3179,7 @@ def _render_track_demo(
     </div>
     <div class='track-pills'>
       <span class='decision-pill {decision_pill}'>{decision}</span>
+      <span class='source-pill {source_class}'>{source_text}</span>
       <span class='metric-pill'>P {proba:.2f}</span>
       <span class='metric-pill'>T {threshold:.2f}</span>
     </div>
@@ -1596,7 +3263,7 @@ def _load_stage4_data() -> pd.DataFrame:
 
 def _apply_feature_allowlist(features: list[str]) -> list[str]:
     allow = [f for f in DEMO_SHARED_FEATURES if f in features]
-    return allow
+    return allow if allow else features
 
 
 def _align_features(features: list[str], *dfs: pd.DataFrame) -> list[str]:
@@ -1744,6 +3411,9 @@ def _demo_decision(
     lap_col: str | None,
     tire_max: float,
     lookahead_laps: int,
+    decision_margin: float = 0.05,
+    window_start: int | None = None,
+    window_end: int | None = None,
 ) -> dict:
     def _get_val(keys: list[str]) -> float | None:
         for key in keys:
@@ -1761,7 +3431,17 @@ def _demo_decision(
     pit_window_val = _get_val(["in_pit_window", "in_pit_window_prev", "pit_window", "pit_window_prev"])
     pit_window_text = "OPEN" if pit_window_val is not None and pit_window_val > 0 else "CLOSED"
     if pit_window_val is None:
-        pit_window_text = "N/A"
+        if (
+            window_start is not None
+            and window_end is not None
+            and lap_value is not None
+        ):
+            if window_start <= lap_value <= window_end:
+                pit_window_text = "OPEN"
+            else:
+                pit_window_text = "CLOSED"
+        else:
+            pit_window_text = "N/A"
 
     sc_flag = _get_val(["sc_active", "sc_active_prev"])
     vsc_flag = _get_val(["vsc_active", "vsc_active_prev"])
@@ -1834,6 +3514,8 @@ def _demo_decision(
         tire_wear_pct = val / 100.0 if val > 1.0 else val
     elif tire_age is not None:
         tire_wear_pct = min(1.0, float(tire_age) / float(tire_max))
+    if tire_wear_pct is not None and tire_age is not None and tire_age <= 2:
+        tire_wear_pct = min(float(tire_wear_pct), 0.1)
 
     gap_leader = _get_val(["gap", "gap_to_leader_prev"])
     gap_front = _get_val(["interval", "gap_to_front_prev"])
@@ -1857,17 +3539,33 @@ def _demo_decision(
             gap_trend_text = "SAFE"
 
     decision_reasons = []
+    high_wear = tire_wear_pct is not None and tire_wear_pct >= 0.65
+    urgent_wear = tire_wear_pct is not None and tire_wear_pct >= 0.8
+    critical_wear = tire_wear_pct is not None and tire_wear_pct >= 0.9
+    window_soon = (
+        window_start is not None
+        and lap_value is not None
+        and lap_value < window_start
+        and (window_start - lap_value) <= 2
+    )
     if pit_window_text == "OPEN":
         decision_reasons.append("WINDOW")
     if sc_text in ("SC", "VSC"):
         decision_reasons.append(sc_text)
     if tire_wear_pct is not None and tire_wear_pct >= 0.7:
         decision_reasons.append("WEAR")
+    if urgent_wear:
+        decision_reasons.append("WEAR-URGENT")
+    if critical_wear:
+        decision_reasons.append("WEAR-CRIT")
+    if window_soon:
+        decision_reasons.append("WINDOW-SOON")
     if race_progress is not None and race_progress >= 0.75:
         decision_reasons.append("LATE")
     if not decision_reasons:
         decision_reasons.append("CORE")
 
+    lock_decision = False
     used_threshold = float(threshold)
     if pit_window_text == "OPEN":
         used_threshold = max(0.05, used_threshold - 0.08)
@@ -1875,15 +3573,64 @@ def _demo_decision(
         used_threshold = max(0.05, used_threshold - 0.12)
     if tire_wear_pct is not None and tire_wear_pct >= 0.7:
         used_threshold = max(0.05, used_threshold - 0.06)
+    if urgent_wear:
+        used_threshold = max(0.05, used_threshold - 0.10)
+    if high_wear:
+        used_threshold = max(0.05, used_threshold - 0.04)
     if race_progress is not None and race_progress >= 0.75:
         used_threshold = max(0.05, used_threshold - 0.03)
+    precision_floor = max(0.12, threshold - 0.03)
+    used_threshold = max(used_threshold, precision_floor)
 
+    margin = float(np.clip(decision_margin, 0.02, 0.12))
     if pit_window_text == "OPEN":
-        decision = "BOX BOX" if proba >= used_threshold else "STANDBY"
+        if critical_wear:
+            decision = "BOX BOX"
+            lock_decision = True
+        elif urgent_wear:
+            decision = "BOX BOX"
+        elif high_wear and proba >= used_threshold - margin:
+            decision = "BOX BOX"
+        elif proba >= used_threshold + margin:
+            decision = "BOX BOX"
+        elif proba >= used_threshold - margin:
+            decision = "STANDBY"
+        else:
+            decision = "STANDBY" if high_wear else "STAY OUT"
+        if sc_text in ("SC", "VSC") and decision == "BOX BOX":
+            lock_decision = True
     else:
-        decision = "STAY OUT"
-        if proba >= used_threshold:
+        if urgent_wear:
+            decision = "STANDBY"
             decision_reasons.append("NOWINDOW")
+        elif window_soon and high_wear:
+            decision = "STANDBY"
+        else:
+            decision = "STAY OUT"
+            if proba >= used_threshold + margin:
+                decision_reasons.append("NOWINDOW")
+
+    cooldown_laps = 2
+    if tire_age is not None and tire_age <= cooldown_laps:
+        if decision != "STAY OUT":
+            decision = "STAY OUT"
+            decision_reasons.append("COOLDOWN")
+
+    baseline_reasons = []
+    if pit_window_text == "OPEN":
+        baseline_reasons.append("WINDOW")
+        if tire_wear_pct is not None and tire_wear_pct >= 0.7:
+            baseline_reasons.append("WEAR")
+        if race_progress is not None and race_progress >= 0.8:
+            baseline_reasons.append("LATE")
+        if "WEAR" in baseline_reasons or "LATE" in baseline_reasons:
+            baseline_decision = "BOX BOX"
+        else:
+            baseline_decision = "STANDBY"
+    else:
+        baseline_reasons.append("NOWINDOW")
+        baseline_decision = "STANDBY" if urgent_wear else "STAY OUT"
+    baseline_reason_text = "+".join(baseline_reasons) if baseline_reasons else "CORE"
 
     pit_loss_sec = 20.0
     if sc_text in ("SC", "VSC"):
@@ -1926,7 +3673,7 @@ def _demo_decision(
     if pit_window_text == "OPEN":
         pit_target_text = "NOW"
     elif pit_window_text == "CLOSED":
-        pit_target_text = "HOLD"
+        pit_target_text = "SOON" if urgent_wear else "HOLD"
     else:
         pit_target_text = "N/A"
 
@@ -1939,8 +3686,22 @@ def _demo_decision(
         except Exception:
             lap_text = "Latest lap"
 
+    decision_source = "MODEL"
+    if lock_decision:
+        decision_source = "POLICY"
+    elif decision in ("BOX BOX", "PIT NOW") and proba < used_threshold:
+        decision_source = "POLICY"
+    elif decision in ("STAY OUT", "STANDBY") and proba >= used_threshold + margin:
+        decision_source = "POLICY"
+    if any(tag in decision_reasons for tag in ("COOLDOWN", "COST-", "NOWINDOW")):
+        decision_source = "POLICY"
+
     return {
         "decision": decision,
+        "baseline_decision": baseline_decision,
+        "baseline_reason_text": baseline_reason_text,
+        "decision_source": decision_source,
+        "lock_decision": lock_decision,
         "used_threshold": used_threshold,
         "race_progress": race_progress,
         "urgency": urgency,
@@ -2100,914 +3861,734 @@ def _plot_metric_box(df: pd.DataFrame, metric: str) -> plt.Figure:
     return fig
 
 
+
+
+def _render_strategy_demo(summary: pd.DataFrame, mode: str, presenter_mode: bool) -> None:
+        st.markdown("### Strategy Demo")
+        st.markdown(
+            "<div class='legend-row'>"
+            "<div class='legend-item'><span class='decision-pill decision-pit'>BOX BOX</span>"
+            "<span class='legend-note'>pit now</span></div>"
+            "<div class='legend-item'><span class='decision-pill decision-wait'>STANDBY</span>"
+            "<span class='legend-note'>prepare / window soon</span></div>"
+            "<div class='legend-item'><span class='decision-pill decision-stay'>STAY OUT</span>"
+            "<span class='legend-note'>continue</span></div>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+
+        if not _XGB_OK:
+            st.info("Demo prediction requires xgboost + scikit-learn installed.")
+        else:
+            df_demo = _load_stage4_data()
+            if df_demo.empty or "Driver" not in df_demo.columns:
+                st.info("Driver column not available in the Stage 4 dataset.")
+            else:
+                df_demo = df_demo.copy()
+                df_demo["weather_label"] = _derive_weather_label(df_demo)
+                circuit_col = _pick_column(df_demo, CIRCUIT_COL_CANDIDATES)
+                leakage_cols = _leakage_audit(df_demo)
+                if leakage_cols:
+                    leaked = ", ".join(leakage_cols[:6])
+                    extra = "..." if len(leakage_cols) > 6 else ""
+                    st.markdown(
+                        f"<div class='audit-badge audit-fail'>Leakage risk: {html.escape(leaked + extra)}</div>",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.markdown(
+                        "<div class='audit-badge audit-pass'>Leakage guard: PASS</div>",
+                        unsafe_allow_html=True,
+                    )
+                def _calc_tire_max(df: pd.DataFrame) -> float | None:
+                    if "tireage" in df.columns:
+                        tire_vals = pd.to_numeric(df["tireage"], errors="coerce").dropna()
+                    elif "stint_laps_prev" in df.columns:
+                        tire_vals = pd.to_numeric(df["stint_laps_prev"], errors="coerce").dropna()
+                    else:
+                        return None
+                    if tire_vals.empty:
+                        return None
+                    return float(np.nanpercentile(tire_vals, 90))
+
+                tire_max_global = _calc_tire_max(df_demo)
+                if tire_max_global is None or not np.isfinite(tire_max_global) or tire_max_global <= 0:
+                    tire_max_global = 35.0
+
+                group_col = "race_id" if "race_id" in df_demo.columns else None
+                n_splits = 5
+                if "n_splits" in summary.columns:
+                    try:
+                        n_splits = int(summary["n_splits"].iloc[0])
+                    except Exception:
+                        n_splits = 5
+
+                fold_id = 1
+                split_indices = _split_groupkfold(df_demo, group_col, n_splits, fold_id) if group_col else None
+
+                if split_indices:
+                    train_idx, test_idx = split_indices
+                    train_df = df_demo.iloc[train_idx]
+                    test_df = df_demo.iloc[test_idx]
+                else:
+                    train_df = df_demo
+                    test_df = df_demo
+
+                def _stat_card(label: str, stats: dict | None) -> None:
+                    if stats is None:
+                        card_html = (
+                            "<div class='card'>"
+                            f"<div class='card-title'>{label} rows</div>"
+                            "<div class='card-value'>N/A</div>"
+                            "<div class='card-sub'>Split unavailable</div>"
+                            "</div>"
+                        )
+                    else:
+                        sub_parts = []
+                        if stats["pos_rate"] is not None:
+                            sub_parts.append(f"Pos {stats['pos_rate'] * 100:.1f}%")
+                        if stats["groups"] is not None:
+                            sub_parts.append(f"Races {stats['groups']}")
+                        sub_text = " | ".join(sub_parts) if sub_parts else " "
+                        card_html = (
+                            "<div class='card'>"
+                            f"<div class='card-title'>{label} rows</div>"
+                            f"<div class='card-value'>{stats['rows']}</div>"
+                            f"<div class='card-sub'>{sub_text}</div>"
+                            "</div>"
+                        )
+                    st.markdown(card_html, unsafe_allow_html=True)
+
+                stats_train = _dataset_stats(train_df, "decide_pitstop", group_col) if split_indices else None
+                stats_test = _dataset_stats(test_df, "decide_pitstop", group_col) if split_indices else None
+                stats_all = _dataset_stats(df_demo, "decide_pitstop", group_col)
+                if "decide_pitstop" not in df_demo.columns:
+                    st.warning("Demo requires 'decide_pitstop' column in the dataset.")
+                    return
+
+                lap_col = "lapno_prev" if "lapno_prev" in df_demo.columns else "lapno" if "lapno" in df_demo.columns else None
+                lap_bounds = _lap_range(df_demo, lap_col)
+                lap_min, lap_max = (lap_bounds if lap_bounds else (1, 70))
+
+                drivers = sorted(df_demo["Driver"].dropna().astype(str).unique().tolist())
+                if not drivers:
+                    st.info("No driver values found in the Stage 4 dataset.")
+                    return
+
+                circuits = []
+                if circuit_col and circuit_col in df_demo.columns:
+                    circuits = sorted(df_demo[circuit_col].dropna().astype(str).unique().tolist())
+                weather_vals = sorted(df_demo["weather_label"].dropna().astype(str).unique().tolist())
+
+                default_scenario = _pick_default_scenario(train_df, test_df, circuit_col) or {}
+                default_driver = default_scenario.get("Driver", drivers[0])
+                default_weather = default_scenario.get("weather_label")
+                default_circuit = default_scenario.get(circuit_col) if circuit_col else None
+
+                def _safe_index(options: list[str], value: str | None, fallback: int = 0) -> int:
+                    if value is None:
+                        return fallback
+                    try:
+                        return options.index(value)
+                    except ValueError:
+                        return fallback
+
+                lap_value = int(lap_min)
+
+                def _resolve_context(df: pd.DataFrame) -> pd.DataFrame:
+                    if df.empty:
+                        return df
+                    attempts = [
+                        (driver_sel, circuit_filter, weather_filter),
+                        (driver_sel, circuit_filter, None),
+                        (driver_sel, None, None),
+                        (None, None, None),
+                    ]
+                    for d, c, w in attempts:
+                        out = _apply_scenario_filters(df, d, circuit_col, c, w)
+                        if not out.empty:
+                            return out
+                    return df
+
+                def _pick_row(df_context: pd.DataFrame, lap_target: int) -> pd.Series | None:
+                    if df_context.empty:
+                        return None
+                    if lap_col and lap_col in df_context.columns:
+                        laps = pd.to_numeric(df_context[lap_col], errors="coerce")
+                        laps = laps.fillna(lap_target)
+                        idx = (laps - lap_target).abs().idxmin()
+                        return df_context.loc[idx]
+                    return df_context.iloc[-1]
+
+                def _int_val(val: object, fallback: int | None = None) -> int | None:
+                    try:
+                        return int(float(val))
+                    except Exception:
+                        return fallback
+
+
+                group_col = "race_id" if "race_id" in df_demo.columns else None
+                try:
+                    features = build_feature_list(df_demo, "decide_pitstop", group_col or "race_id")
+                except Exception:
+                    features = [c for c in df_demo.columns if c not in ("decide_pitstop", group_col)]
+                features = _apply_feature_allowlist(features)
+                features = _align_features(features, train_df, test_df)
+
+                if not features:
+                    st.warning("No shared features available for the demo model.")
+                    return
+
+                model, calibrator, cal_threshold = _train_demo_model(train_df, features, group_col)
+                train_df = train_df.copy()
+                test_df = test_df.copy()
+                train_probs_raw = model.predict_proba(train_df[features])[:, 1]
+                test_probs_raw = model.predict_proba(test_df[features])[:, 1]
+                if calibrator is not None:
+                    try:
+                        train_probs = calibrator.predict_proba(train_probs_raw.reshape(-1, 1))[:, 1]
+                        test_probs = calibrator.predict_proba(test_probs_raw.reshape(-1, 1))[:, 1]
+                    except Exception:
+                        train_probs = train_probs_raw
+                        test_probs = test_probs_raw
+                else:
+                    train_probs = train_probs_raw
+                    test_probs = test_probs_raw
+
+                train_df["proba_raw"] = train_probs_raw
+                train_df["proba"] = train_probs
+                test_df["proba_raw"] = test_probs_raw
+                test_df["proba"] = test_probs
+
+                target_precision = 0.6
+                precision_guard = 0.03
+                decision_threshold = cal_threshold if cal_threshold is not None else _select_threshold(
+                    train_df["decide_pitstop"].astype(int).values,
+                    train_probs,
+                    beta=1.0,
+                )
+                prec_thresh = _threshold_for_precision(
+                    train_df["decide_pitstop"].astype(int).values, train_probs, target_precision
+                )
+                if prec_thresh is not None:
+                    decision_threshold = max(decision_threshold, prec_thresh + precision_guard)
+                decision_threshold = float(np.clip(decision_threshold, 0.05, 0.95))
+
+                smooth_window = 3
+                confirm_laps = 2
+                alert_cap = 0.1
+                lookahead_laps = 4
+
+                summary_use = summary.copy()
+                if "stage_id" not in summary_use.columns and "stage" in summary_use.columns:
+                    stage_match = summary_use["stage"].astype(str).str.extract(r"Stage\s+(\d+)")
+                    summary_use["stage_id"] = pd.to_numeric(stage_match[0], errors="coerce").fillna(0).astype(int)
+
+                def _get_stage_val(stage_id: int) -> float | None:
+                    row = summary_use.loc[summary_use["stage_id"] == stage_id]
+                    if row.empty:
+                        return None
+                    return float(row.iloc[0]["mean_f1"])
+
+                s1 = _get_stage_val(1)
+                s2 = _get_stage_val(2)
+                s3 = _get_stage_val(3)
+                s4 = _get_stage_val(4)
+                delta21 = None if s1 is None or s2 is None else s2 - s1
+                delta43 = None if s3 is None or s4 is None else s4 - s3
+
+                quick_lines = []
+                if s1 is not None and s2 is not None:
+                    quick_lines.append(f"S2 vs S1: {delta21:+.3f} F1")
+                if s3 is not None and s4 is not None:
+                    quick_lines.append(f"S4 vs S3: {delta43:+.3f} F1")
+                quick_text = " | ".join(quick_lines) if quick_lines else "F1 summary unavailable."
+                quick_html = (
+                    "<div class='card'>"
+                    "<div class='card-title'>Quick Result (F1)</div>"
+                    f"<div class='card-value'>{_fmt(s2) if s2 is not None else 'N/A'}</div>"
+                    f"<div class='card-sub'>{html.escape(quick_text)}</div>"
+                    "</div>"
+                )
+
+                tower_rows = []
+                for sid in sorted(summary_use["stage_id"].dropna().unique().tolist()):
+                    row = summary_use.loc[summary_use["stage_id"] == sid].iloc[0]
+                    stage_label = f"S{int(sid)}"
+                    method = "MyMethod" if int(sid) in (2, 4) else "RefTech"
+                    delta = None
+                    if int(sid) == 2 and delta21 is not None:
+                        delta = delta21
+                    if int(sid) == 4 and delta43 is not None:
+                        delta = delta43
+                    tower_rows.append(
+                        {"stage": stage_label, "value": float(row["mean_f1"]), "method": method, "delta": delta}
+                    )
+
+                summary_cols = st.columns([1.2, 1.8])
+                with summary_cols[0]:
+                    st.markdown(quick_html, unsafe_allow_html=True)
+                with summary_cols[1]:
+                    st.markdown(
+                        _timing_tower_html(tower_rows, "F1", dom_id="tower-demo", title="Timing Tower"),
+                        unsafe_allow_html=True,
+                    )
+
+                st.markdown("#### Iconic Scenario: Monaco 2022 Ferrari Double-Stack")
+                scenario_rows = _find_monaco_double_stack(df_demo, lap_col)
+                hero_payload = None
+                hero_prob = None
+                hero_driver = None
+                hero_lap = None
+                hero_delta = None
+                hero_hist_call = None
+                hero_model_call = None
+                if scenario_rows:
+                    st.caption(
+                        "Historical pit call vs model what‑if (demo only). "
+                        "Estimated impact uses the same pit-loss heuristic as the demo."
+                    )
+                    scen_cols = st.columns(len(scenario_rows))
+                    for col, row in zip(scen_cols, scenario_rows):
+                        lap_val = _int_val(row.get(lap_col, lap_value) if lap_col else lap_value, lap_value)
+                        row_df = pd.DataFrame([row])
+                        prob_raw = float(model.predict_proba(row_df[features])[:, 1][0])
+                        if calibrator is not None:
+                            try:
+                                prob = float(calibrator.predict_proba(np.array([[prob_raw]]))[:, 1][0])
+                            except Exception:
+                                prob = prob_raw
+                        else:
+                            prob = prob_raw
+                        payload = _demo_decision(
+                            row,
+                            prob,
+                            decision_threshold,
+                            lap_val,
+                            lap_col,
+                            tire_max_global,
+                            lookahead_laps,
+                            decision_margin=0.05,
+                            window_start=None,
+                            window_end=None,
+                        )
+                        hist_call = "PIT" if int(row.get("decide_pitstop", 0)) == 1 else "STAY OUT"
+                        model_call = payload["decision"]
+                        net_gain = float(payload.get("net_gain_sec", 0.0))
+                        impact_hist = net_gain if hist_call == "PIT" else 0.0
+                        impact_model = net_gain if model_call.startswith("BOX") else 0.0
+                        delta = impact_model - impact_hist
+                        driver = str(row.get("Driver", "DRV"))
+                        if hero_payload is None:
+                            hero_payload = payload
+                            hero_prob = prob
+                            hero_driver = driver
+                            hero_lap = lap_val
+                            hero_delta = delta
+                            hero_hist_call = hist_call
+                            hero_model_call = model_call
+                        lap_txt = f"Lap {lap_val}" if lap_val is not None else "Lap N/A"
+                        card = (
+                            "<div class='card'>"
+                            f"<div class='card-title'>{driver} | Monaco 2022 | {lap_txt}</div>"
+                            f"<div class='card-value'>{delta:+.1f}s</div>"
+                            f"<div class='card-sub'>Historical: {hist_call} · Model: {model_call}</div>"
+                            f"<div class='card-sub'>Net pit gain estimate: {net_gain:+.1f}s</div>"
+                            "</div>"
+                        )
+                        with col:
+                            st.markdown(card, unsafe_allow_html=True)
+                else:
+                    st.info("Monaco 2022 scenario not found in the dataset. Using general demo below.")
+
+                if hero_payload is not None and hero_prob is not None:
+                    call_html = (
+                        "<div class='card'>"
+                        "<div class='card-title'>Model Call (Monaco 2022)</div>"
+                        f"<div class='card-value'>{html.escape(str(hero_model_call))}</div>"
+                        f"<div class='card-sub'>Historical: {hero_hist_call} · Δ {hero_delta:+.1f}s · "
+                        f"P(pit) {hero_prob:.2f}</div>"
+                        "</div>"
+                    )
+                    st.markdown(call_html, unsafe_allow_html=True)
+
+                with st.expander("Details (advanced)", expanded=False):
+                    stat_cols = st.columns(3)
+                    with stat_cols[0]:
+                        _stat_card("Train", stats_train if split_indices else None)
+                    with stat_cols[1]:
+                        _stat_card("Test", stats_test if split_indices else None)
+                    with stat_cols[2]:
+                        _stat_card("All", stats_all)
+
+                    select_cols = st.columns([1.1, 1.1, 1.0])
+                    with select_cols[0]:
+                        driver_sel = st.selectbox("Driver", drivers, index=_safe_index(drivers, default_driver))
+                    with select_cols[1]:
+                        if circuits:
+                            circuit_options = ["Auto"] + circuits
+                            circuit_sel = st.selectbox(
+                                "Circuit",
+                                circuit_options,
+                                index=_safe_index(circuit_options, default_circuit, fallback=0),
+                            )
+                        else:
+                            circuit_sel = "Auto"
+                            st.selectbox("Circuit", ["Auto"], index=0, disabled=True)
+                    with select_cols[2]:
+                        if weather_vals:
+                            weather_options = ["Auto"] + weather_vals
+                            weather_sel = st.selectbox(
+                                "Weather",
+                                weather_options,
+                                index=_safe_index(weather_options, default_weather, fallback=0),
+                            )
+                        else:
+                            weather_sel = "Auto"
+                            st.selectbox("Weather", ["Auto"], index=0, disabled=True)
+
+                    lap_value = st.slider(
+                        "Lap timeline",
+                        min_value=int(lap_min),
+                        max_value=int(lap_max),
+                        value=int(lap_min),
+                        step=1,
+                    )
+
+                    circuit_filter = None if circuit_sel == "Auto" else circuit_sel
+                    weather_filter = None if weather_sel == "Auto" else weather_sel
+
+                    train_context = _apply_scenario_filters(train_df, driver_sel, circuit_col, circuit_filter, weather_filter)
+                    test_context = _apply_scenario_filters(test_df, driver_sel, circuit_col, circuit_filter, weather_filter)
+                    if train_context.empty:
+                        train_context = _resolve_context(train_df)
+                    if test_context.empty:
+                        test_context = _resolve_context(test_df)
+
+                    train_row = _pick_row(train_context, lap_value)
+                    test_row = _pick_row(test_context, lap_value)
+                    if train_row is None or test_row is None:
+                        st.warning("Unable to resolve demo rows after filtering.")
+                        return
+
+                    train_lap_val = _int_val(train_row.get(lap_col, lap_value) if lap_col else lap_value, lap_value)
+                    test_lap_val = _int_val(test_row.get(lap_col, lap_value) if lap_col else lap_value, lap_value)
+    
+                    train_window = _pit_window_bounds(train_context, lap_col)
+                    test_window = _pit_window_bounds(test_context, lap_col)
+                    train_win_start, train_win_end = train_window if train_window else (None, None)
+                    test_win_start, test_win_end = test_window if test_window else (None, None)
+    
+                    train_range = _lap_range(train_context, lap_col) or (lap_min, lap_max)
+                    test_range = _lap_range(test_context, lap_col) or (lap_min, lap_max)
+    
+                    train_prob = float(train_row.get("proba", train_row.get("proba_raw", 0.0)))
+                    test_prob = float(test_row.get("proba", test_row.get("proba_raw", 0.0)))
+                    train_prob_smooth = _smooth_prob_by_lap(train_context, lap_col, "proba", train_lap_val, smooth_window)
+                    test_prob_smooth = _smooth_prob_by_lap(test_context, lap_col, "proba", test_lap_val, smooth_window)
+                    if train_prob_smooth is not None:
+                        train_prob = float(train_prob_smooth)
+                    if test_prob_smooth is not None:
+                        test_prob = float(test_prob_smooth)
+    
+                    train_payload = _demo_decision(
+                        train_row,
+                        train_prob,
+                        decision_threshold,
+                        train_lap_val,
+                        lap_col,
+                        tire_max_global,
+                        lookahead_laps,
+                        decision_margin=0.05,
+                        window_start=train_win_start,
+                        window_end=train_win_end,
+                    )
+                    test_payload = _demo_decision(
+                        test_row,
+                        test_prob,
+                        decision_threshold,
+                        test_lap_val,
+                        lap_col,
+                        tire_max_global,
+                        lookahead_laps,
+                        decision_margin=0.05,
+                        window_start=test_win_start,
+                        window_end=test_win_end,
+                    )
+    
+                    circuit_text = str(train_row.get(circuit_col, "N/A")) if circuit_col else "N/A"
+                    weather_text = str(train_row.get("weather_label", "N/A"))
+    
+                    st.markdown(
+                        "<div class='demo-chip-row'>"
+                        f"<div class='demo-chip'>Driver <strong>{html.escape(driver_sel)}</strong></div>"
+                        f"<div class='demo-chip'>Circuit <strong>{html.escape(circuit_text)}</strong></div>"
+                        f"<div class='demo-chip'>Weather <strong>{html.escape(weather_text)}</strong></div>"
+                        f"<div class='demo-chip'>Lap <strong>L{train_lap_val}</strong></div>"
+                        "</div>",
+                        unsafe_allow_html=True,
+                    )
+    
+                    pit_cols = st.columns(2)
+                    with pit_cols[0]:
+                        st.markdown(
+                            _pit_window_gauge_html(
+                                "Train Pit Window",
+                                train_range[0],
+                                train_range[1],
+                                train_lap_val,
+                                train_win_start,
+                                train_win_end,
+                                train_win_start or train_lap_val,
+                            ),
+                            unsafe_allow_html=True,
+                        )
+                    with pit_cols[1]:
+                        st.markdown(
+                            _pit_window_gauge_html(
+                                "Test Pit Window",
+                                test_range[0],
+                                test_range[1],
+                                test_lap_val,
+                                test_win_start,
+                                test_win_end,
+                                test_win_start or test_lap_val,
+                            ),
+                            unsafe_allow_html=True,
+                        )
+    
+                    policy_cols = st.columns(2)
+                    with policy_cols[0]:
+                        st.markdown(
+                            _policy_summary_html(
+                                decision_threshold,
+                                target_precision,
+                                precision_guard,
+                                alert_cap,
+                                smooth_window,
+                                confirm_laps,
+                            ),
+                            unsafe_allow_html=True,
+                        )
+                    with policy_cols[1]:
+                        train_sentence = _decision_sentence(train_payload, train_prob, decision_threshold)
+                        test_sentence = _decision_sentence(test_payload, test_prob, decision_threshold)
+                        summary_html = (
+                            "<div class='card'>"
+                            "<div class='card-title'>Decision Summary</div>"
+                            f"<div class='card-sub'><strong>Train:</strong> {html.escape(train_sentence)}</div>"
+                            f"<div class='card-sub'><strong>Test:</strong> {html.escape(test_sentence)}</div>"
+                            "</div>"
+                        )
+                        st.markdown(summary_html, unsafe_allow_html=True)
+    
+                    track_cols = st.columns(2)
+                    with track_cols[0]:
+                        st.markdown(
+                            _render_track_demo(
+                                "Train (Learned)",
+                                driver_sel,
+                                train_payload["lap_text"],
+                                circuit_text,
+                                weather_text,
+                                train_payload["decision"],
+                                train_payload["decision_source"],
+                                train_prob,
+                                decision_threshold,
+                                train_payload["race_progress"],
+                                train_payload["urgency"],
+                                train_payload["pit_window_text"],
+                                train_payload["pit_target_text"],
+                                train_payload["tire_text"],
+                                train_payload["tire_wear_pct"],
+                                train_payload["gap_text"],
+                                train_payload["sc_text"],
+                                train_payload["progress_text"],
+                                train_payload["gap_trend_text"],
+                                train_payload["overtake_mode"],
+                                train_payload["reason_text"],
+                                bool(train_payload.get("tire_wear_pct") and train_payload.get("tire_wear_pct") <= 0.1),
+                                train_lap_val,
+                                train_range[0],
+                                train_range[1],
+                                train_win_start,
+                                train_win_end,
+                                train_win_start,
+                            ),
+                            unsafe_allow_html=True,
+                        )
+                    with track_cols[1]:
+                        test_circuit = str(test_row.get(circuit_col, circuit_text)) if circuit_col else circuit_text
+                        test_weather = str(test_row.get("weather_label", weather_text))
+                        st.markdown(
+                            _render_track_demo(
+                                "Test (Unseen)",
+                                driver_sel,
+                                test_payload["lap_text"],
+                                test_circuit,
+                                test_weather,
+                                test_payload["decision"],
+                                test_payload["decision_source"],
+                                test_prob,
+                                decision_threshold,
+                                test_payload["race_progress"],
+                                test_payload["urgency"],
+                                test_payload["pit_window_text"],
+                                test_payload["pit_target_text"],
+                                test_payload["tire_text"],
+                                test_payload["tire_wear_pct"],
+                                test_payload["gap_text"],
+                                test_payload["sc_text"],
+                                test_payload["progress_text"],
+                                test_payload["gap_trend_text"],
+                                test_payload["overtake_mode"],
+                                test_payload["reason_text"],
+                                bool(test_payload.get("tire_wear_pct") and test_payload.get("tire_wear_pct") <= 0.1),
+                                test_lap_val,
+                                test_range[0],
+                                test_range[1],
+                                test_win_start,
+                                test_win_end,
+                                test_win_start,
+                            ),
+                            unsafe_allow_html=True,
+                        )
+    
+                    telemetry_cols = st.columns(2)
+                    with telemetry_cols[0]:
+                        gap_pct = _gap_percentile(train_context, train_row)
+                        tele_html = _telemetry_panel_html(
+                            "Train telemetry",
+                            driver_sel,
+                            train_payload["lap_text"],
+                            circuit_text,
+                            weather_text,
+                            train_row,
+                            train_payload,
+                            train_lap_val,
+                            train_prob,
+                            float(train_row.get("proba_raw", train_prob)),
+                            decision_threshold,
+                            None,
+                            gap_pct,
+                        )
+                        st.markdown(tele_html, unsafe_allow_html=True)
+                    with telemetry_cols[1]:
+                        gap_pct = _gap_percentile(test_context, test_row)
+                        tele_html = _telemetry_panel_html(
+                            "Test telemetry",
+                            driver_sel,
+                            test_payload["lap_text"],
+                            test_circuit,
+                            test_weather,
+                            test_row,
+                            test_payload,
+                            test_lap_val,
+                            test_prob,
+                            float(test_row.get("proba_raw", test_prob)),
+                            decision_threshold,
+                            None,
+                            gap_pct,
+                        )
+                        st.markdown(tele_html, unsafe_allow_html=True)
+    
+                    ladder_cols = st.columns(2)
+                    with ladder_cols[0]:
+                        st.markdown(
+                            _decision_ladder_html("Train Decision Ladder", train_payload["decision"]),
+                            unsafe_allow_html=True,
+                        )
+                    with ladder_cols[1]:
+                        st.markdown(
+                            _decision_ladder_html("Test Decision Ladder", test_payload["decision"]),
+                            unsafe_allow_html=True,
+                        )
+    
+                    def _rel_class(label: str) -> str:
+                        low = label.lower()
+                        if low.startswith("h"):
+                            return "high"
+                        if low.startswith("m"):
+                            return "med"
+                        return "low"
+    
+                    train_label = _reliability_label(
+                        stats_train["rows"] if stats_train else len(train_df),
+                        stats_train["groups"] if stats_train else None,
+                        stats_train["pos_rate"] if stats_train else None,
+                    )
+                    test_label = _reliability_label(
+                        stats_test["rows"] if stats_test else len(test_df),
+                        stats_test["groups"] if stats_test else None,
+                        stats_test["pos_rate"] if stats_test else None,
+                    )
+                    rel_html = (
+                        "<div class='reliability-ribbon'>"
+                        "<span class='reliability-pill'>Reliability</span>"
+                        f"<span class='reliability-pill {_rel_class(train_label)}'>Train {train_label}</span>"
+                        f"<span class='reliability-pill {_rel_class(test_label)}'>Test {test_label}</span>"
+                        "</div>"
+                    )
+                    st.markdown(rel_html, unsafe_allow_html=True)
+    
+                    if presenter_mode:
+                        train_strength, train_gap = _decision_strength(train_prob, decision_threshold)
+                        test_strength, test_gap = _decision_strength(test_prob, decision_threshold)
+                        helper_html = (
+                            "<div class='helper-card'>"
+                            "<div class='helper-title'>Presenter helper</div>"
+                            "<div class='helper-grid'>"
+                            "<div>"
+                            "<span class='helper-pill'>Train data <strong>learned behavior</strong></span>"
+                            f"<div class='helper-note'>Decision strength: {train_strength} (|P-T| {train_gap:.2f})</div>"
+                            f"<div class='helper-note'>Data reliability: {train_label}</div>"
+                            f"<div class='helper-note'>{html.escape(train_sentence)}</div>"
+                            "</div>"
+                            "<div>"
+                            "<span class='helper-pill'>Test data <strong>unseen races</strong></span>"
+                            f"<div class='helper-note'>Decision strength: {test_strength} (|P-T| {test_gap:.2f})</div>"
+                            f"<div class='helper-note'>Data reliability: {test_label}</div>"
+                            f"<div class='helper-note'>{html.escape(test_sentence)}</div>"
+                            "</div>"
+                            "</div>"
+                            "</div>"
+                        )
+                        st.markdown(helper_html, unsafe_allow_html=True)
+    
+    
+    
 def main() -> None:
     st.set_page_config(page_title="Pit Stop Dashboard", layout="wide")
     _inject_css()
 
-    st.sidebar.markdown("## Controls")
-    mode = st.sidebar.radio("Dataset mode", ["Strict", "Standard"], horizontal=False)
-    presenter_mode = st.sidebar.checkbox("Presenter mode", value=True)
-    show_explainers = st.sidebar.checkbox("Show metric guide", value=True)
-    st.sidebar.markdown("## Overlay")
-    team_name = st.sidebar.text_input("Team label", value="MY PITWALL")
-    session_name = st.sidebar.text_input("Session", value="RACE")
-    event_name = st.sidebar.text_input("Event tag", value="UNSEEN RACES - GROUPKFOLD")
-    lap_text = st.sidebar.text_input("Lap counter", value="LAP 12/58")
-    weather_text = st.sidebar.text_input("Conditions", value="TRACK: MIXED")
-
-    if mode == "Strict":
-        summary_path = SUMMARY_STRICT
-        folds_path = FOLDS_STRICT if FOLDS_STRICT.exists() else None
-    else:
-        summary_path = SUMMARY_STD
-        folds_path = FOLDS_STANDARD if FOLDS_STANDARD.exists() else None
-
-    if not summary_path.exists():
-        st.error(f"Missing summary file: {summary_path}")
-        return
-
-    summary = _load_summary(summary_path, summary_path.stat().st_mtime)
-    folds = (
-        _load_folds(folds_path, folds_path.stat().st_mtime)
-        if folds_path and folds_path.exists()
-        else None
-    )
-
-    if mode == "Standard":
-        st.warning(
-            "Standard mode may include same-lap features and is not leakage-safe. "
-            "Use Strict mode for thesis claims."
-        )
-
-    available_metrics = {
-        label: cols
-        for label, cols in METRICS.items()
-        if cols[0] in summary.columns and cols[1] in summary.columns
-    }
-    if not available_metrics:
-        st.error("No metrics found in the summary file.")
-        return
-
-    metric_name = st.sidebar.selectbox(
-        "Primary metric",
-        list(available_metrics.keys()),
-        index=0,
-        key="primary_metric",
-    )
-
-    metric_col, std_col = available_metrics[metric_name]
-
-    delta_table = _metric_delta_table(summary, available_metrics)
-    fold_stats = _fold_delta_stats(folds, available_metrics) if folds is not None else pd.DataFrame()
-    thesis_md = _build_thesis_summary(summary, available_metrics, fold_stats)
-
-    st.markdown(
-        f"""
-<div class="topbar">
-  <div class="topbar-left">
-    <span class="logo-badge">P1</span>
-    <div>
-      <div class="top-title">{team_name}</div>
-      <div class="top-sub">{event_name}</div>
-    </div>
-  </div>
-  <div class="topbar-center">
-    <span class="pill">SESSION <strong>{session_name}</strong></span>
-    <span class="pill">{lap_text}</span>
-  </div>
-  <div class="topbar-right">
-    <span class="pill">{weather_text}</span>
-    <span class="badge">GroupKFold Summary</span>
-  </div>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-
-    st.markdown("<div class='section-title'>Pit Stop Performance Dashboard</div>", unsafe_allow_html=True)
-
-    if show_explainers:
-        guide = _metric_guide()
-        guide_text = "<br/>".join([f"<strong>{k}:</strong> {v}" for k, v in guide.items()])
-        with st.expander("Metric guide", expanded=False):
-            st.markdown(f"<div class='callout'>{guide_text}</div>", unsafe_allow_html=True)
-
-    takeaways = _key_takeaways(summary, metric_col)
-    example_text = _example_explainer(summary, metric_col, std_col)
-    col_a, col_b = st.columns([1.2, 1])
-    with col_a:
-        st.markdown(
-            f"<div class='callout'><strong>Key Takeaways:</strong> {takeaways}</div>",
-            unsafe_allow_html=True,
-        )
-    with col_b:
-        st.markdown(
-            f"<div class='example-card'><strong>Metric Snapshot:</strong> {example_text}</div>",
-            unsafe_allow_html=True,
-        )
-
-    st.markdown("### Strategy Demo")
-    if not _XGB_OK:
-        st.info("Demo prediction requires xgboost + scikit-learn installed.")
-    else:
-        df_demo = _load_stage4_data()
-        if df_demo.empty or "Driver" not in df_demo.columns:
-            st.info("Driver column not available in the Stage 4 dataset.")
-        else:
-            df_demo = df_demo.copy()
-            df_demo["weather_label"] = _derive_weather_label(df_demo)
-            circuit_col = _pick_column(df_demo, CIRCUIT_COL_CANDIDATES)
-            tire_max = None
-            if "tireage" in df_demo.columns:
-                tire_vals = pd.to_numeric(df_demo["tireage"], errors="coerce").dropna()
-                if not tire_vals.empty:
-                    tire_max = float(np.nanpercentile(tire_vals, 90))
-            elif "stint_laps_prev" in df_demo.columns:
-                tire_vals = pd.to_numeric(df_demo["stint_laps_prev"], errors="coerce").dropna()
-                if not tire_vals.empty:
-                    tire_max = float(np.nanpercentile(tire_vals, 90))
-            if tire_max is None or not np.isfinite(tire_max) or tire_max <= 0:
-                tire_max = 35.0
-
-            group_col = "race_id" if "race_id" in df_demo.columns else None
-            n_splits = 5
-            if "n_splits" in summary.columns:
-                try:
-                    n_splits = int(summary["n_splits"].iloc[0])
-                except Exception:
-                    n_splits = 5
-
-            fold_id = 1
-            split_indices = _split_groupkfold(df_demo, group_col, n_splits, fold_id) if group_col else None
-
-            if split_indices:
-                train_idx, test_idx = split_indices
-                train_df = df_demo.iloc[train_idx]
-                test_df = df_demo.iloc[test_idx]
-            else:
-                train_df = df_demo
-                test_df = df_demo
-
-            def _stat_card(label: str, stats: dict | None) -> None:
-                if stats is None:
-                    card_html = (
-                        "<div class='card'>"
-                        f"<div class='card-title'>{label} rows</div>"
-                        "<div class='card-value'>N/A</div>"
-                        "<div class='card-sub'>Split unavailable</div>"
-                        "</div>"
-                    )
-                else:
-                    sub_parts = []
-                    if stats["pos_rate"] is not None:
-                        sub_parts.append(f"Pos {stats['pos_rate'] * 100:.1f}%")
-                    if stats["groups"] is not None:
-                        sub_parts.append(f"Races {stats['groups']}")
-                    sub_text = " | ".join(sub_parts) if sub_parts else " "
-                    card_html = (
-                        "<div class='card'>"
-                        f"<div class='card-title'>{label} rows</div>"
-                        f"<div class='card-value'>{stats['rows']}</div>"
-                        f"<div class='card-sub'>{sub_text}</div>"
-                        "</div>"
-                    )
-                st.markdown(card_html, unsafe_allow_html=True)
-
-            stats_train = _dataset_stats(train_df, "decide_pitstop", group_col) if split_indices else None
-            stats_test = _dataset_stats(test_df, "decide_pitstop", group_col) if split_indices else None
-            stats_all = _dataset_stats(df_demo, "decide_pitstop", group_col)
-            stat_cols = st.columns(3)
-            with stat_cols[0]:
-                _stat_card("Train", stats_train if split_indices else None)
-            with stat_cols[1]:
-                _stat_card("Test", stats_test if split_indices else None)
-            with stat_cols[2]:
-                _stat_card("All", stats_all)
-
-            ctrl1, ctrl2, ctrl3 = st.columns(3)
-            train_drivers = set(train_df["Driver"].dropna().astype(str))
-            test_drivers = set(test_df["Driver"].dropna().astype(str))
-            common_drivers = sorted(train_drivers.intersection(test_drivers))
-            drivers = common_drivers if common_drivers else sorted(train_drivers.union(test_drivers))
-            with ctrl1:
-                driver = st.selectbox("Driver", drivers, index=0) if drivers else None
-                if not drivers:
-                    st.info("No driver names found in the dataset.")
-
-            train_driver = train_df
-            test_driver = test_df
-            if driver is not None:
-                train_driver = train_df[train_df["Driver"] == driver]
-                test_driver = test_df[test_df["Driver"] == driver]
-
-            with ctrl2:
-                if circuit_col:
-                    train_c = train_driver[circuit_col].dropna().astype(str)
-                    test_c = test_driver[circuit_col].dropna().astype(str)
-                    common_circuits = sorted(set(train_c).intersection(set(test_c)))
-                    circuits = common_circuits if common_circuits else sorted(set(train_c).union(set(test_c)))
-                    if common_circuits:
-                        circuit_choice = st.selectbox("Circuit", ["Auto"] + circuits, index=0)
-                        circuit_sel = circuits[0] if circuit_choice == "Auto" else circuit_choice
-                    else:
-                        circuit_sel = st.selectbox("Circuit", circuits, index=0) if circuits else None
-                else:
-                    circuit_sel = None
-
-            with ctrl3:
-                train_w = train_driver["weather_label"].dropna().astype(str)
-                test_w = test_driver["weather_label"].dropna().astype(str)
-                common_weather = sorted(set(train_w).intersection(set(test_w)))
-                weathers = common_weather if common_weather else sorted(set(train_w).union(set(test_w)))
-                if common_weather:
-                    weather_choice = st.selectbox("Weather", ["Auto"] + weathers, index=0)
-                    weather_sel = weathers[0] if weather_choice == "Auto" else weather_choice
-                else:
-                    weather_sel = st.selectbox("Weather", weathers, index=0) if weathers else None
-
-            train_filtered = train_driver
-            test_filtered = test_driver
-            if circuit_col and circuit_sel:
-                train_filtered = train_filtered[train_filtered[circuit_col].astype(str) == circuit_sel]
-                test_filtered = test_filtered[test_filtered[circuit_col].astype(str) == circuit_sel]
-            if weather_sel:
-                train_filtered = train_filtered[train_filtered["weather_label"] == weather_sel]
-                test_filtered = test_filtered[test_filtered["weather_label"] == weather_sel]
-
-            train_filtered_all = train_filtered
-            test_filtered_all = test_filtered
-
-            lap_used = None
-            lap_col = "lapno" if "lapno" in df_demo.columns else "lapno_prev" if "lapno_prev" in df_demo.columns else None
-            lap_key = "lap_value"
-            lap_min = None
-            lap_max = None
-            lap_pool: list[int] | None = None
-            stint_col = _pick_column(df_demo, ["pitstops_so_far", "pitstops_so_far_prev"])
-            tire_col = _pick_column(df_demo, ["tireage", "stint_laps_prev"])
-            if lap_col and lap_col in df_demo.columns:
-                train_laps = pd.to_numeric(train_filtered[lap_col], errors="coerce").dropna().astype(int)
-                test_laps = pd.to_numeric(test_filtered[lap_col], errors="coerce").dropna().astype(int)
-                common_laps = sorted(set(train_laps).intersection(set(test_laps)))
-                if common_laps:
-                    lap_pool = common_laps
-                else:
-                    union_laps = sorted(set(train_laps).union(set(test_laps)))
-                    lap_pool = union_laps if union_laps else None
-
-                if lap_pool:
-                    lap_min = int(min(lap_pool))
-                    lap_max = int(max(lap_pool))
-                    if lap_key not in st.session_state:
-                        st.session_state[lap_key] = lap_min
-                    st.slider(
-                        "Lap timeline",
-                        min_value=lap_min,
-                        max_value=lap_max,
-                        step=1,
-                        key=lap_key,
-                    )
-                    lap_value = int(st.session_state[lap_key])
-                    lap_used = min(lap_pool, key=lambda x: abs(x - lap_value))
-                else:
-                    st.text_input("Lap timeline", value="N/A", disabled=True)
-            else:
-                st.text_input("Lap timeline", value="N/A", disabled=True)
-
-            if driver is not None:
-                chip_lap = f"L{lap_used}" if lap_used is not None else "N/A"
-                chip_circuit = circuit_sel if circuit_sel else "Any"
-                chip_weather = weather_sel if weather_sel else "Any"
-                st.markdown(
-                    "<div class='demo-chip-row'>"
-                    f"<span class='demo-chip'>Driver <strong>{driver}</strong></span>"
-                    f"<span class='demo-chip'>Circuit <strong>{chip_circuit}</strong></span>"
-                    f"<span class='demo-chip'>Weather <strong>{chip_weather}</strong></span>"
-                    f"<span class='demo-chip'>Lap <strong>{chip_lap}</strong></span>"
-                    "</div>",
-                    unsafe_allow_html=True,
-                )
-
-            def _filter_same_stint(
-                df_context: pd.DataFrame,
-                lap_value: int | None,
-            ) -> pd.DataFrame:
-                if lap_value is None or lap_col is None or lap_col not in df_context.columns:
-                    return df_context
-                if stint_col and stint_col in df_context.columns:
-                    match = df_context.loc[df_context[lap_col] == lap_value, stint_col].dropna()
-                    if not match.empty:
-                        stint_val = match.iloc[-1]
-                        return df_context[df_context[stint_col] == stint_val]
-                    return df_context
-                if tire_col and tire_col in df_context.columns:
-                    df_laps = df_context.copy()
-                    df_laps[lap_col] = pd.to_numeric(df_laps[lap_col], errors="coerce")
-                    df_laps[tire_col] = pd.to_numeric(df_laps[tire_col], errors="coerce")
-                    df_laps = df_laps.dropna(subset=[lap_col, tire_col]).sort_values(lap_col)
-                    if df_laps.empty:
-                        return df_context
-                    resets = df_laps[tire_col].diff().fillna(0) < -4
-                    df_laps["stint_id"] = resets.cumsum()
-                    target = df_laps.loc[df_laps[lap_col] == lap_value, "stint_id"]
-                    if target.empty:
-                        return df_context
-                    stint_id = int(target.iloc[-1])
-                    return df_context.loc[df_laps.index[df_laps["stint_id"] == stint_id]]
-                return df_context
-
-            train_context = _filter_same_stint(train_filtered, lap_used)
-            test_context = _filter_same_stint(test_filtered, lap_used)
-
-            win_train = _pit_window_bounds(train_context, lap_col)
-            win_test = _pit_window_bounds(test_context, lap_col)
-
-            if lap_used is not None and lap_col and lap_col in train_filtered.columns:
-                train_filtered = train_context[train_context[lap_col] == lap_used]
-            if lap_used is not None and lap_col and lap_col in test_filtered.columns:
-                test_filtered = test_context[test_context[lap_col] == lap_used]
-
-            train_scope = train_filtered if not train_filtered.empty else train_driver
-            test_scope = test_filtered if not test_filtered.empty else test_driver
-
-            raw_features = build_feature_list(df_demo, "decide_pitstop", "race_id")
-            features = _apply_feature_allowlist(raw_features)
-            features = _align_features(features, train_df, test_df)
-            if not features:
-                st.warning("No shared features available for the demo.")
-            elif driver is None:
-                st.info("Demo controls are unavailable until driver data is loaded.")
-            else:
-                with st.spinner("Loading demo model..."):
-                    model, calibrator, cal_threshold = _train_demo_model(train_df, features, group_col)
-
-                def _apply_calibration(raw_prob: float) -> float:
-                    if calibrator is None:
-                        return raw_prob
-                    try:
-                        return float(calibrator.predict_proba(np.array([[raw_prob]]))[:, 1][0])
-                    except Exception:
-                        return raw_prob
-
-                base_threshold = 0.5
-                if "threshold" in summary.columns:
-                    try:
-                        base_threshold = float(summary.loc[summary["stage_id"] == 4, "threshold"].iloc[0])
-                    except Exception:
-                        base_threshold = 0.5
-                if not np.isfinite(base_threshold):
-                    base_threshold = 0.5
-                threshold = _apply_calibration(base_threshold)
-                if cal_threshold is not None and np.isfinite(cal_threshold):
-                    threshold = float(cal_threshold)
-
-                train_row = train_scope.iloc[-1]
-                test_row = test_scope.iloc[-1]
-
-                train_raw = float(model.predict_proba(train_row[features].to_frame().T)[:, 1][0])
-                test_raw = float(model.predict_proba(test_row[features].to_frame().T)[:, 1][0])
-                train_proba = _apply_calibration(train_raw)
-                test_proba = _apply_calibration(test_raw)
-
-                lookahead_laps = 6
-                train_payload = _demo_decision(
-                    train_row,
-                    train_proba,
-                    threshold,
-                    lap_used,
-                    lap_col,
-                    tire_max,
-                    lookahead_laps,
-                )
-                test_payload = _demo_decision(
-                    test_row,
-                    test_proba,
-                    threshold,
-                    lap_used,
-                    lap_col,
-                    tire_max,
-                    lookahead_laps,
-                )
-
-                def _stint_reset_flag(df_context: pd.DataFrame) -> bool:
-                    if lap_used is None or lap_col is None or lap_col not in df_context.columns:
-                        return False
-                    if stint_col and stint_col in df_context.columns:
-                        current = df_context.loc[df_context[lap_col] == lap_used, stint_col].dropna()
-                        prev = df_context.loc[df_context[lap_col] < lap_used, stint_col].dropna()
-                        if current.empty or prev.empty:
-                            return False
-                        try:
-                            return float(current.iloc[-1]) > float(prev.iloc[-1])
-                        except Exception:
-                            return False
-                    if tire_col and tire_col in df_context.columns:
-                        df_laps = df_context.copy()
-                        df_laps[lap_col] = pd.to_numeric(df_laps[lap_col], errors="coerce")
-                        df_laps[tire_col] = pd.to_numeric(df_laps[tire_col], errors="coerce")
-                        df_laps = df_laps.dropna(subset=[lap_col, tire_col]).sort_values(lap_col)
-                        if df_laps.empty:
-                            return False
-                        current = df_laps.loc[df_laps[lap_col] == lap_used, tire_col]
-                        prev = df_laps.loc[df_laps[lap_col] < lap_used, tire_col]
-                        if current.empty or prev.empty:
-                            return False
-                        curr_val = float(current.iloc[-1])
-                        prev_val = float(prev.iloc[-1])
-                        return curr_val <= 3.0 and (prev_val - curr_val) >= 5.0
-                    return False
-
-                train_reset = _stint_reset_flag(train_context)
-                test_reset = _stint_reset_flag(test_context)
-
-                def _recommend_next_lap(df_context: pd.DataFrame) -> dict | None:
-                    if lap_col is None or df_context.empty:
-                        return None
-                    df_laps = df_context.copy()
-                    df_laps[lap_col] = pd.to_numeric(df_laps[lap_col], errors="coerce")
-                    df_laps = df_laps.dropna(subset=[lap_col])
-                    if df_laps.empty:
-                        return None
-                    if lap_used is not None:
-                        df_laps = df_laps[
-                            (df_laps[lap_col] >= lap_used)
-                            & (df_laps[lap_col] <= lap_used + lookahead_laps)
-                        ]
-                    if df_laps.empty:
-                        return None
-                    df_laps = df_laps.sort_values(lap_col).head(lookahead_laps + 1)
-                    best = None
-                    for _, r in df_laps.iterrows():
-                        lap_val = int(r[lap_col])
-                        p_raw = float(model.predict_proba(r[features].to_frame().T)[:, 1][0])
-                        p = _apply_calibration(p_raw)
-                        payload = _demo_decision(r, p, threshold, lap_val, lap_col, tire_max, lookahead_laps)
-                        score = float(payload["net_gain_sec"])
-                        if best is None or score > best["net_gain_sec"]:
-                            best = {
-                                "lap": lap_val,
-                                "net_gain_sec": score,
-                                "proba": p,
-                            }
-                    return best
-
-                train_rec = _recommend_next_lap(train_context)
-                test_rec = _recommend_next_lap(test_context)
-
-                def _driver_label(row: pd.Series, fallback: str) -> str:
-                    if "Driver" in row and pd.notna(row["Driver"]):
-                        return str(row["Driver"])
-                    return fallback
-
-                def _display_text(row: pd.Series, fallback: str, col_name: str | None) -> str:
-                    if col_name and col_name in row and pd.notna(row[col_name]):
-                        return str(row[col_name])
-                    return fallback
-
-                train_circuit_text = _display_text(train_row, circuit_sel, circuit_col)
-                if not train_circuit_text or train_circuit_text == "Any":
-                    train_circuit_text = "Circuit"
-                test_circuit_text = _display_text(test_row, circuit_sel, circuit_col)
-                if not test_circuit_text or test_circuit_text == "Any":
-                    test_circuit_text = "Circuit"
-
-                train_weather_text = str(train_row["weather_label"]) if "weather_label" in train_row else weather_sel
-                if not train_weather_text or train_weather_text == "Any":
-                    train_weather_text = "Weather"
-                test_weather_text = str(test_row["weather_label"]) if "weather_label" in test_row else weather_sel
-                if not test_weather_text or test_weather_text == "Any":
-                    test_weather_text = "Weather"
-
-                train_range = _lap_range(train_context, lap_col)
-                test_range = _lap_range(test_context, lap_col)
-                group_cols = []
-                if group_col and group_col in df_demo.columns:
-                    group_cols.append(group_col)
-                if "Driver" in df_demo.columns:
-                    group_cols.append("Driver")
-
-                demo_cols = st.columns(2)
-                with demo_cols[0]:
-                    st.markdown(
-                        _render_track_demo(
-                            panel_label="Train (Learned)",
-                            driver=_driver_label(train_row, driver or "Driver"),
-                            lap_text=train_payload["lap_text"],
-                            circuit_text=train_circuit_text,
-                            weather_text=train_weather_text,
-                            decision=train_payload["decision"],
-                            proba=train_proba,
-                            threshold=train_payload["used_threshold"],
-                            race_progress=train_payload["race_progress"],
-                            urgency=train_payload["urgency"],
-                            pit_window_text=train_payload["pit_window_text"],
-                            pit_target_text=train_payload["pit_target_text"],
-                            tire_text=train_payload["tire_text"],
-                            tire_wear_pct=train_payload["tire_wear_pct"],
-                            gap_text=train_payload["gap_text"],
-                            sc_text=train_payload["sc_text"],
-                            progress_text=train_payload["progress_text"],
-                            gap_trend_text=train_payload["gap_trend_text"],
-                            overtake_mode=train_payload["overtake_mode"],
-                            reason_text=train_payload["reason_text"],
-                            stint_reset=train_reset,
-                            lap_current=int(lap_used) if lap_used is not None else None,
-                            lap_min=train_range[0] if train_range else None,
-                            lap_max=train_range[1] if train_range else None,
-                            window_start=win_train[0] if win_train else None,
-                            window_end=win_train[1] if win_train else None,
-                            rec_lap=train_rec["lap"] if train_rec else None,
-                        ),
-                        unsafe_allow_html=True,
-                    )
-                with demo_cols[1]:
-                    st.markdown(
-                        _render_track_demo(
-                            panel_label="Test (Unseen)",
-                            driver=_driver_label(test_row, driver or "Driver"),
-                            lap_text=test_payload["lap_text"],
-                            circuit_text=test_circuit_text,
-                            weather_text=test_weather_text,
-                            decision=test_payload["decision"],
-                            proba=test_proba,
-                            threshold=test_payload["used_threshold"],
-                            race_progress=test_payload["race_progress"],
-                            urgency=test_payload["urgency"],
-                            pit_window_text=test_payload["pit_window_text"],
-                            pit_target_text=test_payload["pit_target_text"],
-                            tire_text=test_payload["tire_text"],
-                            tire_wear_pct=test_payload["tire_wear_pct"],
-                            gap_text=test_payload["gap_text"],
-                            sc_text=test_payload["sc_text"],
-                            progress_text=test_payload["progress_text"],
-                            gap_trend_text=test_payload["gap_trend_text"],
-                            overtake_mode=test_payload["overtake_mode"],
-                            reason_text=test_payload["reason_text"],
-                            stint_reset=test_reset,
-                            lap_current=int(lap_used) if lap_used is not None else None,
-                            lap_min=test_range[0] if test_range else None,
-                            lap_max=test_range[1] if test_range else None,
-                            window_start=win_test[0] if win_test else None,
-                            window_end=win_test[1] if win_test else None,
-                            rec_lap=test_rec["lap"] if test_rec else None,
-                        ),
-                        unsafe_allow_html=True,
-                    )
-                train_rows = int(len(train_filtered_all))
-                test_rows = int(len(test_filtered_all))
-                train_strength, train_gap = _decision_strength(train_proba, threshold)
-                test_strength, test_gap = _decision_strength(test_proba, threshold)
-                helper_html = (
-                    "<div class='helper-card'>"
-                    "<div class='helper-title'>Presenter Helper</div>"
-                    "<div class='helper-grid'>"
-                    "<div>"
-                    "<div class='helper-pill'>Train data <strong>learned behavior</strong></div>"
-                    f"<div class='helper-note'>Decision strength: {train_strength} (|P-T| {train_gap:.2f})</div>"
-                    f"<div class='helper-note'>Data reliability: {_reliability_label(train_rows)} ({train_rows} rows)</div>"
-                    f"<div class='helper-note'>{_decision_sentence(train_payload, train_proba, threshold)}</div>"
-                    "</div>"
-                    "<div>"
-                    "<div class='helper-pill'>Test data <strong>unseen races</strong></div>"
-                    f"<div class='helper-note'>Decision strength: {test_strength} (|P-T| {test_gap:.2f})</div>"
-                    f"<div class='helper-note'>Data reliability: {_reliability_label(test_rows)} ({test_rows} rows)</div>"
-                    f"<div class='helper-note'>{_decision_sentence(test_payload, test_proba, threshold)}</div>"
-                    "</div>"
-                    "</div>"
-                    "</div>"
-                )
-                st.markdown(helper_html, unsafe_allow_html=True)
-                summary_cols = st.columns(2)
-
-                def _diff_summary(left: dict, right: dict) -> str:
-                    diffs = []
-
-                    def _add(label: str, a: str, b: str) -> None:
-                        if a != b:
-                            diffs.append(f"{label} {a} vs {b}")
-
-                    _add("Service window", left["pit_window_text"], right["pit_window_text"])
-                    _add("Tyre age", left["tire_text"], right["tire_text"])
-                    _add("Time gap", left["gap_text"], right["gap_text"])
-                    _add("Track status", left["sc_text"], right["sc_text"])
-                    if not diffs:
-                        return "No major differences"
-                    return " | ".join(diffs[:3])
-
-                diff_text = _diff_summary(train_payload, test_payload)
-                train_rec_text = "N/A"
-                if train_rec is not None:
-                    train_rec_text = f"L{train_rec['lap']} (net {train_rec['net_gain_sec']:+.1f}s)"
-                test_rec_text = "N/A"
-                if test_rec is not None:
-                    test_rec_text = f"L{test_rec['lap']} (net {test_rec['net_gain_sec']:+.1f}s)"
-
-                def _input_summary(
-                    label: str,
-                    driver_name: str,
-                    circuit_text: str,
-                    weather_text: str,
-                    payload: dict,
-                    diff_note: str,
-                    rec_note: str,
-                    row: pd.Series,
-                ) -> str:
-                    telemetry_html = _telemetry_sections(row, payload)
-                    return (
-                        "<div class='card summary-card'>"
-                        f"<div class='card-title'>{label} Summary</div>"
-                        f"<div class='card-sub'>Driver: {driver_name}</div>"
-                        f"<div class='card-sub'>Current lap: {payload['lap_text']}</div>"
-                        f"<div class='card-sub'>Service window: {payload['pit_window_text']}</div>"
-                        f"<div class='card-sub'>Suggested stop: {rec_note}</div>"
-                        f"<div class='card-sub'>Current call: {payload['decision']}</div>"
-                        f"<div class='card-sub summary-diff'>Key differences: {diff_note}</div>"
-                        f"{telemetry_html}"
-                        "</div>"
-                    )
-
-                with summary_cols[0]:
-                    st.markdown(
-                        _input_summary(
-                            "Train",
-                            _driver_label(train_row, driver or "Driver"),
-                            train_circuit_text,
-                            train_weather_text,
-                            train_payload,
-                            diff_text,
-                            train_rec_text,
-                            train_row,
-                        ),
-                        unsafe_allow_html=True,
-                    )
-                with summary_cols[1]:
-                    st.markdown(
-                        _input_summary(
-                            "Test",
-                            _driver_label(test_row, driver or "Driver"),
-                            test_circuit_text,
-                            test_weather_text,
-                            test_payload,
-                            diff_text,
-                            test_rec_text,
-                            test_row,
-                        ),
-                        unsafe_allow_html=True,
-                    )
-                st.markdown("### Strategy Impact (Estimated)")
-                impact_train = _strategy_impact(
-                    train_filtered_all,
-                    features,
-                    model,
-                    calibrator,
-                    threshold,
-                    lap_col,
-                    tire_max,
-                    lookahead_laps,
-                    group_cols,
-                )
-                impact_test = _strategy_impact(
-                    test_filtered_all,
-                    features,
-                    model,
-                    calibrator,
-                    threshold,
-                    lap_col,
-                    tire_max,
-                    lookahead_laps,
-                    group_cols,
-                )
-                impact_cols = st.columns(2)
-                for col, title, impact in (
-                    (impact_cols[0], "Train impact", impact_train),
-                    (impact_cols[1], "Test impact", impact_test),
-                ):
-                    with col:
-                        if impact is None:
-                            st.info("Impact backtest is unavailable for this selection.")
-                            continue
-                        summary_impact, table = impact
-                        card_html = (
-                            "<div class='card'>"
-                            f"<div class='card-title'>{title}</div>"
-                            f"<div class='card-value'>{summary_impact['avg_delta']:+.1f}s</div>"
-                            f"<div class='card-sub'>Median {summary_impact['median_delta']:+.1f}s</div>"
-                            f"<div class='card-sub'>Improved {summary_impact['improve_rate'] * 100:.0f}%</div>"
-                            f"<div class='card-sub'>Groups {summary_impact['groups']}</div>"
-                            f"<div class='card-sub'>Rows {summary_impact['rows']}</div>"
-                            "</div>"
-                        )
-                        st.markdown(card_html, unsafe_allow_html=True)
-                        top = table.sort_values("delta", ascending=False).head(5)
-                        show_cols = [c for c in group_cols if c in top.columns] + ["delta"]
-                        st.dataframe(top[show_cols], use_container_width=True, hide_index=True)
-
-                st.markdown("### Baseline Model Check (Test Split)")
-                compare = _baseline_compare(
-                    train_filtered_all,
-                    test_filtered_all,
-                    features,
-                    model,
-                    calibrator,
-                    threshold,
-                    group_col,
-                )
-                if compare is None:
-                    st.info("Baseline comparison is unavailable for this selection.")
-                else:
-                    metrics_df, sign_stats = compare
-                    st.dataframe(metrics_df, use_container_width=True, hide_index=True)
-                    if sign_stats:
-                        lr_p = sign_stats.get("xgb_vs_lr_p")
-                        rf_p = sign_stats.get("xgb_vs_rf_p")
-                        lr_p_text = f"{lr_p:.3f}" if lr_p is not None else "N/A"
-                        rf_p_text = f"{rf_p:.3f}" if rf_p is not None else "N/A"
-                        st.caption(
-                            "XGB vs LogReg win rate "
-                            f"{sign_stats['xgb_vs_lr_win_rate'] * 100:.0f}% "
-                            f"(p={lr_p_text})"
-                        )
-                        st.caption(
-                            "XGB vs RandomForest win rate "
-                            f"{sign_stats['xgb_vs_rf_win_rate'] * 100:.0f}% "
-                            f"(p={rf_p_text})"
-                        )
-
-                st.caption("Estimated impact from simplified cost model; not a full race-time simulation.")
-
-    st.markdown("### Stage Snapshot")
-    cols = st.columns(4)
-    for idx, row in summary.iterrows():
-        delta_text = ""
-        delta_badge = ""
-        if row["stage_id"] in (2, 4):
-            prev = summary.loc[idx - 1, metric_col]
-            delta = row[metric_col] - prev
-            delta_text = f"Delta vs prev: {delta:+.3f}"
-            delta_badge = _delta_badge(delta)
-        else:
-            delta_badge = "<span class='delta-flat'>Baseline</span>"
-
-        card_html = (
-            "<div class='card'>"
-            f"<div class='card-title'>{row['stage_short']} - {row['method']}</div>"
-            f"<div class='card-value'>{_fmt(row[metric_col])}</div>"
-            f"<div class='card-sub'>Std: {_fmt(row[std_col])}</div>"
-            f"<div class='card-sub'>{row['dataset']}</div>"
-            f"<div class='card-sub'>{delta_text}</div>"
-            f"<div class='card-sub'>{delta_badge}</div>"
-            "</div>"
-        )
-        cols[idx].markdown(card_html, unsafe_allow_html=True)
-
     st.markdown(
         """
-<div class="legend">
-  <span><i class="swatch swatch-ref"></i>RefTech</span>
-  <span><i class="swatch swatch-my"></i>MyMethod</span>
-</div>
-""",
+        <div class="hero">
+          <div class="hero-title">PIT STOP PERFORMANCE DASHBOARD</div>
+          <div class="hero-tagline">Every second matters</div>
+          <div class="hero-sub">Use the sidebar to switch between Overview and Demo.</div>
+        </div>
+        """
+        ,
         unsafe_allow_html=True,
     )
 
-    st.markdown("### Metric Comparison")
-    st.pyplot(_plot_metric_bar(summary, metric_col, std_col), use_container_width=True)
-
-    if presenter_mode:
-        tabs = ["Summary Table", "Stage Deltas", "CRISP-DM", "Project Details", "Thesis Summary"]
-    else:
-        tabs = [
-            "Summary Table",
-            "Stage Deltas",
-            "Fold Details",
-            "PowerBI",
-            "CRISP-DM",
-            "Project Details",
-            "Thesis Summary",
-        ]
-    tab_map = dict(zip(tabs, st.tabs(tabs)))
-
-    with tab_map["Summary Table"]:
-        show_cols = ["stage", "method", "dataset"]
-        for mean_col, stdc in available_metrics.values():
-            show_cols.extend([mean_col, stdc])
-        show_cols = [c for c in show_cols if c in summary.columns]
-        st.dataframe(summary[show_cols], use_container_width=True, hide_index=True)
-
-        with st.expander("All metrics view", expanded=not presenter_mode):
-            fig, axes = plt.subplots(2, 3, figsize=(12, 7))
-            fig.patch.set_facecolor("#0f131b")
-            axes = axes.flatten()
-            for ax, (label, (mean_col, stdc)) in zip(axes, available_metrics.items()):
-                x = np.arange(len(summary))
-                ax.bar(
-                    x,
-                    summary[mean_col].to_numpy(),
-                    yerr=summary[stdc].to_numpy(),
-                    capsize=4,
-                    color=["#ff2b2b" if m == "MyMethod" else "#2c3545" for m in summary["method"]],
-                    edgecolor="#111",
-                    linewidth=0.5,
-                )
-                ax.set_title(label)
-                ax.set_xticks(x, summary["stage_short"].tolist())
-                ax.set_ylim(0.0, 1.0)
-                ax.grid(axis="y", linestyle="--", alpha=0.25, color="#7a8796")
-                ax.set_facecolor("#0f131b")
-                ax.tick_params(axis="x", colors="#d7dde6")
-                ax.tick_params(axis="y", colors="#d7dde6")
-                ax.title.set_color("#d7dde6")
-                ax.spines["top"].set_visible(False)
-                ax.spines["right"].set_visible(False)
-                ax.spines["left"].set_color("#465267")
-                ax.spines["bottom"].set_color("#465267")
-            for ax in axes[len(available_metrics) :]:
-                ax.axis("off")
-            fig.tight_layout()
-            st.pyplot(fig, use_container_width=True)
-
-    with tab_map["Stage Deltas"]:
-        if delta_table.empty:
-            st.info("Delta table is not available for this dataset.")
-        else:
-            st.markdown("**Stage Improvements (mean deltas)**")
-            st.dataframe(delta_table, use_container_width=True, hide_index=True)
-        if fold_stats.empty:
-            st.info("Fold-level paired tests are only available for Strict mode with fold data.")
-        else:
-            st.markdown("**Fold-level paired deltas + significance**")
-            st.dataframe(fold_stats, use_container_width=True, hide_index=True)
-            if (fold_stats["test"] == "sign").any():
-                st.caption("Note: Sign test is used when SciPy Wilcoxon is unavailable.")
-
-    with tab_map["CRISP-DM"]:
-        crisp_lines = [
-            "**Business Understanding**: Define a decision-support goal for pit-stop timing and compare to a reference method.",
-            "**Data Understanding**: Inspect race, lap, and weather signals; verify class balance and leakage risks.",
-            "**Data Preparation**: Clean CSVs and engineer pace, pit-window, and weather features.",
-            "**Modeling**: Train XGBoost models with calibrated probabilities across the four stages.",
-            "**Evaluation**: Use GroupKFold by race and report F1/F2/PR-AUC/Recall with fold-level summaries.",
-            "**Deployment**: Deliver the Streamlit pitwall dashboard and strategy-impact backtest panel.",
-        ]
-        st.markdown("\n".join(crisp_lines))
-
-    if not presenter_mode and "Fold Details" in tab_map:
-        with tab_map["Fold Details"]:
-            if folds is None:
-                st.info("Fold details are only available for the Strict dataset.")
-            else:
-                fold_metric = st.selectbox("Fold metric", list(available_metrics.keys()), index=0, key="fold_metric")
-                fold_col = available_metrics[fold_metric][0].replace("mean_", "")
-                st.pyplot(_plot_metric_box(folds, fold_col), use_container_width=True)
-                st.dataframe(folds, use_container_width=True, hide_index=True)
-
-    if not presenter_mode and "PowerBI" in tab_map:
-        with tab_map["PowerBI"]:
-            st.markdown(
-                "Use the CSVs below in PowerBI (Get Data -> Text/CSV). "
-                "Stage names can be used as categories, and mean metrics as values."
-            )
-            st.download_button(
-                "Download summary CSV",
-                summary.to_csv(index=False).encode("utf-8"),
-                file_name=summary_path.name,
-                mime="text/csv",
-            )
-            if folds is not None:
-                st.download_button(
-                    "Download fold CSV",
-                    folds.to_csv(index=False).encode("utf-8"),
-                    file_name=folds_path.name if folds_path else "stage_folds.csv",
-                    mime="text/csv",
-                )
-
-            st.markdown("Paste a PowerBI embed URL to view it here (optional):")
-            embed_url = st.text_input("PowerBI embed URL", value="")
-            if embed_url:
-                st.components.v1.iframe(embed_url, height=700, scrolling=True)
-
-    with tab_map["Project Details"]:
-        if PROJECT_DETAILS.exists():
-            project_md = PROJECT_DETAILS.read_text(encoding="utf-8")
-            st.markdown(project_md)
-            st.download_button(
-                "Download Project Details",
-                project_md.encode("utf-8"),
-                file_name=PROJECT_DETAILS.name,
-                mime="text/markdown",
-            )
-        else:
-            st.info("Project Details file not found.")
-
-    with tab_map["Thesis Summary"]:
-        st.markdown("**Thesis-ready summary**")
-        st.text_area("Summary", thesis_md, height=320)
-        st.download_button(
-            "Download summary (Markdown)",
-            thesis_md.encode("utf-8"),
-            file_name="thesis_results_summary.md",
-            mime="text/markdown",
+    cols = st.columns(2)
+    with cols[0]:
+        st.markdown(
+            "<div class='card'><div class='card-title'>Overview</div>"
+            "<div class='card-sub'>Key metrics, timing tower, holdout snapshot.</div></div>",
+            unsafe_allow_html=True,
         )
+    with cols[1]:
+        st.markdown(
+            "<div class='card'><div class='card-title'>Demo</div>"
+            "<div class='card-sub'>Strategy decision demo (train vs test).</div></div>",
+            unsafe_allow_html=True,
+        )
+
+    st.info("Tip: Use the page list in the sidebar for Overview, Demo, and Project Details.")
 
 
 if __name__ == "__main__":

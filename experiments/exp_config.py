@@ -18,6 +18,8 @@ class Paths:
     out_refdata_mymethod: Path
     out_mydata_reftech_weather: Path
     out_mydata_mymethod_weather: Path
+    out_mydata_reftech_weather_holdout: Path
+    out_mydata_mymethod_weather_holdout: Path
     out_summary_plots: Path
 
 
@@ -67,6 +69,8 @@ def get_paths(project_root: str | Path | None = None) -> Paths:
         out_refdata_mymethod=results_dir / "refdata_mymethod",
         out_mydata_reftech_weather=results_dir / "mydata_reftech_weather",
         out_mydata_mymethod_weather=results_dir / "mydata_mymethod_weather",
+        out_mydata_reftech_weather_holdout=results_dir / "holdout70_mydata_reftech_weather",
+        out_mydata_mymethod_weather_holdout=results_dir / "holdout70_mydata_mymethod_weather",
         out_summary_plots=results_dir / "summary_plots",
     )
 

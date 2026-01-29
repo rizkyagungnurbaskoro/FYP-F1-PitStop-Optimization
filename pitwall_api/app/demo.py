@@ -928,6 +928,13 @@ def run_demo_state(dataset_key: str, selection: dict[str, Any] | None = None) ->
             try: return round(float(val), 3)
             except: return val
 
+        # Determine tire compound with wet weather fallback
+        raw_comp = display_row.get("compound_legit", display_row.get("compound"))
+        if raw_comp and str(raw_comp).upper() not in ("UNKNOWN", "NAN", "NONE", ""):
+            comp_val = str(raw_comp).upper()
+        else:
+            comp_val = "INTERMEDIATE" if w_status == "Wet" else "MEDIUM"
+
         mapping = {
             "sc_active": display_row.get("sc_active", display_row.get("sc_active_prev", 0)),
             "vsc_active": display_row.get("vsc_active", display_row.get("vsc_active_prev", 0)),
@@ -936,7 +943,7 @@ def run_demo_state(dataset_key: str, selection: dict[str, Any] | None = None) ->
             "humidity": display_row.get("Humidity_prev", display_row.get("Humidity", 0)),
             "tyre_age": display_row.get("tire_age_legit", display_row.get("tireage", display_row.get("stint_laps_prev", 0.0))),
             "tire_age": display_row.get("tire_age_legit", display_row.get("tireage", display_row.get("stint_laps_prev", 0.0))),
-            "compound": display_row.get("compound_legit", display_row.get("compound", "MEDIUM")) if (val := display_row.get("compound_legit", display_row.get("compound"))) and str(val).upper() != "UNKNOWN" else "MEDIUM",
+            "compound": comp_val,
             "tire_wear_pct": display_row.get("tyre_wear_pct_prev", display_row.get("tyre_wear_pct", 0.0)),
             "stint_laps": display_row.get("stint_laps", display_row.get("stint_laps_prev", 0.0)),
             "position": int(val) if not pd.isna(val := display_row.get("position", display_row.get("Position_prev", 1))) else 1,
